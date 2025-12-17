@@ -2,6 +2,8 @@
 
 A NIP-85 Trusted Assertions Provider that computes and serves real-time user and event metrics for Nostr.
 
+**Live instance:** `wss://nip85.uid.ovh`
+
 ## What it does
 
 Cipolin is a Nostr relay that generates on-demand metrics assertions:
@@ -27,6 +29,33 @@ When a client queries for these kinds with a `d` tag, Cipolin:
 
 ```bash
 go build
+```
+
+## Docker
+
+### Using pre-built image
+
+```bash
+docker compose -f docker-compose.ghcr.yml up -d
+```
+
+### Building locally
+
+```bash
+docker compose up -d
+```
+
+To rebuild the image after code changes:
+
+```bash
+docker compose up -d --build
+```
+
+### Manual Docker run
+
+```bash
+docker build -t cipolin .
+docker run -d --name cipolin -p 3334:3334 --env-file .env -v ./data:/app/data cipolin
 ```
 
 ## Configuration
