@@ -1,0 +1,13 @@
+services:
+  cipolin:
+    image: ghcr.io/nogringo/cipolin:main
+    container_name: cipolin
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3334}:3334"
+    env_file:
+      - .env
+    environment:
+      - DB_PATH=/app/data/cipolin.db
+    volumes:
+      - ./data:/app/data
