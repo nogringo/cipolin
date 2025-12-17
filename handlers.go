@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/nbd-wtf/go-nostr"
 )
@@ -35,6 +36,7 @@ func handleNIP85Query(ctx context.Context, filter nostr.Filter) (chan *nostr.Eve
 
 		for _, kind := range filter.Kinds {
 			for _, subject := range dTags {
+				start := time.Now()
 				var event *nostr.Event
 				var err error
 
@@ -47,13 +49,15 @@ func handleNIP85Query(ctx context.Context, filter nostr.Filter) (chan *nostr.Eve
 					event, err = generateAddressAssertion(ctx, subject)
 				}
 
+				duration := time.Since(start)
+
 				if err != nil {
-					log.Printf("[handler] Error generating assertion for %s: %v", subject, err)
+					log.Printf("[handler] Error generating assertion for %s (took %v): %v", subject, duration, err)
 					continue
 				}
 
 				if event != nil {
-					log.Printf("[handler] Sending event %s (kind %d) for subject %s", event.ID[:16]+"...", event.Kind, subject[:16]+"...")
+					log.Printf("[handler] Sending event %s (kind %d) for subject %s (took %v)", event.ID[:16]+"...", event.Kind, subject[:16]+"...", duration)
 					select {
 					case ch <- event:
 					case <-ctx.Done():
@@ -68,9 +72,13 @@ func handleNIP85Query(ctx context.Context, filter nostr.Filter) (chan *nostr.Eve
 }
 
 // publishToStorageRelays publishes an event to all storage relays
-func publishToStorageRelays(ctx context.Context, event *nostr.Event) {
+func publishToStorageRelays(event *nostr.Event) {
 	for _, relayURL := range config.StorageRelays {
 		go func(url string) {
+			// Each goroutine gets its own context
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
 			relay, err := nostr.RelayConnect(ctx, url)
 			if err != nil {
 				log.Printf("[publish] Failed to connect to %s: %v", url, err)
@@ -162,7 +170,7 @@ func generateUserAssertion(ctx context.Context, pubkey string) (*nostr.Event, er
 	}
 
 	// Publish to storage relays
-	publishToStorageRelays(ctx, event)
+	publishToStorageRelays(event)
 
 	return event, nil
 }
@@ -205,7 +213,7 @@ func generateEventAssertion(ctx context.Context, eventID string) (*nostr.Event, 
 	}
 
 	// Publish to storage relays
-	publishToStorageRelays(ctx, event)
+	publishToStorageRelays(event)
 
 	return event, nil
 }
@@ -244,7 +252,7 @@ func generateAddressAssertion(ctx context.Context, address string) (*nostr.Event
 	}
 
 	// Publish to storage relays
-	publishToStorageRelays(ctx, event)
+	publishToStorageRelays(event)
 
 	return event, nil
 }
