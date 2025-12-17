@@ -1,4 +1,4 @@
-package main
+package relay
 
 import (
 	"context"
@@ -9,8 +9,8 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 )
 
-// getPopularRelays fetches popular online relays from Breccia's kind 6301 events
-func getPopularRelays(ctx context.Context) ([]string, error) {
+// GetPopularRelays fetches popular online relays from Breccia's kind 6301 events
+func GetPopularRelays(ctx context.Context, storageRelays []string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -21,7 +21,7 @@ func getPopularRelays(ctx context.Context) ([]string, error) {
 	}
 
 	// Try each storage relay
-	for _, relayURL := range config.StorageRelays {
+	for _, relayURL := range storageRelays {
 		relay, err := nostr.RelayConnect(ctx, relayURL)
 		if err != nil {
 			continue
@@ -59,8 +59,8 @@ func getPopularRelays(ctx context.Context) ([]string, error) {
 	}, nil
 }
 
-// getUserNIP65Relays fetches a user's relay list from storage relays
-func getUserNIP65Relays(ctx context.Context, pubkey string) ([]string, error) {
+// GetUserNIP65Relays fetches a user's relay list from storage relays
+func GetUserNIP65Relays(ctx context.Context, storageRelays []string, pubkey string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -71,7 +71,7 @@ func getUserNIP65Relays(ctx context.Context, pubkey string) ([]string, error) {
 	}
 
 	// Try each storage relay
-	for _, relayURL := range config.StorageRelays {
+	for _, relayURL := range storageRelays {
 		relay, err := nostr.RelayConnect(ctx, relayURL)
 		if err != nil {
 			continue
@@ -105,4 +105,25 @@ func getUserNIP65Relays(ctx context.Context, pubkey string) ([]string, error) {
 		"wss://nostr.wine",
 		"wss://relay.primal.net",
 	}, nil
+}
+
+// MergeRelays combines two relay lists into a unique set
+func MergeRelays(a, b []string) []string {
+	seen := make(map[string]bool)
+	var result []string
+
+	for _, r := range a {
+		if !seen[r] {
+			seen[r] = true
+			result = append(result, r)
+		}
+	}
+	for _, r := range b {
+		if !seen[r] {
+			seen[r] = true
+			result = append(result, r)
+		}
+	}
+
+	return result
 }

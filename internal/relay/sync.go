@@ -1,4 +1,4 @@
-package main
+package relay
 
 import (
 	"context"
@@ -7,11 +7,35 @@ import (
 	"sync"
 	"time"
 
+	"cipolin/internal/fetcher"
+
 	"github.com/nbd-wtf/go-nostr"
 )
 
-// syncUserEvents fetches and stores events for computing user metrics
-func syncUserEvents(ctx context.Context, pubkey string, userRelays []string) error {
+// EventStore interface for querying and saving events
+type EventStore interface {
+	QueryEvents(ctx context.Context, filter nostr.Filter) (chan *nostr.Event, error)
+	SaveEvent(ctx context.Context, event *nostr.Event) error
+}
+
+// Syncer handles event synchronization
+type Syncer struct {
+	fetcher       *fetcher.EventFetcher
+	db            EventStore
+	storageRelays []string
+}
+
+// NewSyncer creates a new event syncer
+func NewSyncer(f *fetcher.EventFetcher, db EventStore, storageRelays []string) *Syncer {
+	return &Syncer{
+		fetcher:       f,
+		db:            db,
+		storageRelays: storageRelays,
+	}
+}
+
+// SyncUserEvents fetches and stores events for computing user metrics
+func (s *Syncer) SyncUserEvents(ctx context.Context, pubkey string, userRelays []string) error {
 	log.Printf("[sync] Fetching events for %s...", pubkey[:16]+"...")
 
 	// Filters for user's own relays
@@ -26,8 +50,8 @@ func syncUserEvents(ctx context.Context, pubkey string, userRelays []string) err
 	}
 
 	// Reports should be fetched from popular relays + user relays
-	popularRelays, _ := getPopularRelays(ctx)
-	reportRelays := mergeRelays(popularRelays, userRelays)
+	popularRelays, _ := GetPopularRelays(ctx, s.storageRelays)
+	reportRelays := MergeRelays(popularRelays, userRelays)
 	reportFilters := []nostr.Filter{
 		{Authors: []string{pubkey}, Kinds: []int{1984}},                 // Reports sent
 		{Kinds: []int{1984}, Tags: nostr.TagMap{"p": []string{pubkey}}}, // Reports received
@@ -40,7 +64,7 @@ func syncUserEvents(ctx context.Context, pubkey string, userRelays []string) err
 	onEvent := func(event *nostr.Event) {
 		storeMu.Lock()
 		defer storeMu.Unlock()
-		if err := db.SaveEvent(ctx, event); err != nil {
+		if err := s.db.SaveEvent(ctx, event); err != nil {
 			log.Printf("[sync] Failed to store event: %v", err)
 		}
 	}
@@ -51,13 +75,13 @@ func syncUserEvents(ctx context.Context, pubkey string, userRelays []string) err
 
 	go func() {
 		defer wg.Done()
-		results := fetcher.FetchAllContinuously(ctx, userRelays, userFilters, FetchBackward, deadline, onEvent)
+		results := s.fetcher.FetchAllContinuously(ctx, userRelays, userFilters, fetcher.FetchBackward, deadline, onEvent)
 		logFetchResults("user relays", results)
 	}()
 
 	go func() {
 		defer wg.Done()
-		results := fetcher.FetchAllContinuously(ctx, reportRelays, reportFilters, FetchBackward, deadline, onEvent)
+		results := s.fetcher.FetchAllContinuously(ctx, reportRelays, reportFilters, fetcher.FetchBackward, deadline, onEvent)
 		logFetchResults("reports", results)
 	}()
 
@@ -67,8 +91,8 @@ func syncUserEvents(ctx context.Context, pubkey string, userRelays []string) err
 	return nil
 }
 
-// syncEventInteractions fetches interactions for an event
-func syncEventInteractions(ctx context.Context, eventID string) error {
+// SyncEventInteractions fetches interactions for an event
+func (s *Syncer) SyncEventInteractions(ctx context.Context, eventID string) error {
 	log.Printf("[sync] Fetching interactions for event %s...", eventID[:16]+"...")
 
 	filters := []nostr.Filter{
@@ -80,28 +104,28 @@ func syncEventInteractions(ctx context.Context, eventID string) error {
 		{Kinds: []int{9321}, Tags: nostr.TagMap{"e": []string{eventID}}}, // Nutzaps
 	}
 
-	popularRelays, _ := getPopularRelays(ctx)
+	popularRelays, _ := GetPopularRelays(ctx, s.storageRelays)
 
 	// Try to get the event author's relays
-	authorRelays := getEventAuthorRelays(ctx, eventID, popularRelays)
-	relays := mergeRelays(popularRelays, authorRelays)
+	authorRelays := s.getEventAuthorRelays(ctx, eventID, popularRelays)
+	relays := MergeRelays(popularRelays, authorRelays)
 
 	deadline := time.Now().Add(30 * time.Second)
 
 	onEvent := func(event *nostr.Event) {
-		if err := db.SaveEvent(ctx, event); err != nil {
+		if err := s.db.SaveEvent(ctx, event); err != nil {
 			log.Printf("[sync] Failed to store event: %v", err)
 		}
 	}
 
-	results := fetcher.FetchAllContinuously(ctx, relays, filters, FetchBackward, deadline, onEvent)
+	results := s.fetcher.FetchAllContinuously(ctx, relays, filters, fetcher.FetchBackward, deadline, onEvent)
 	logFetchResults("event interactions", results)
 
 	return nil
 }
 
-// syncAddressInteractions fetches interactions for an addressable event
-func syncAddressInteractions(ctx context.Context, address string) error {
+// SyncAddressInteractions fetches interactions for an addressable event
+func (s *Syncer) SyncAddressInteractions(ctx context.Context, address string) error {
 	log.Printf("[sync] Fetching interactions for address %s...", address)
 
 	filters := []nostr.Filter{
@@ -112,28 +136,28 @@ func syncAddressInteractions(ctx context.Context, address string) error {
 		{Kinds: []int{9321}, Tags: nostr.TagMap{"a": []string{address}}},  // Nutzaps
 	}
 
-	popularRelays, _ := getPopularRelays(ctx)
+	popularRelays, _ := GetPopularRelays(ctx, s.storageRelays)
 
 	// Extract author pubkey from address (format: kind:pubkey:d-tag)
-	authorRelays := getAddressAuthorRelays(ctx, address)
-	relays := mergeRelays(popularRelays, authorRelays)
+	authorRelays := s.getAddressAuthorRelays(ctx, address)
+	relays := MergeRelays(popularRelays, authorRelays)
 
 	deadline := time.Now().Add(30 * time.Second)
 
 	onEvent := func(event *nostr.Event) {
-		if err := db.SaveEvent(ctx, event); err != nil {
+		if err := s.db.SaveEvent(ctx, event); err != nil {
 			log.Printf("[sync] Failed to store event: %v", err)
 		}
 	}
 
-	results := fetcher.FetchAllContinuously(ctx, relays, filters, FetchBackward, deadline, onEvent)
+	results := s.fetcher.FetchAllContinuously(ctx, relays, filters, fetcher.FetchBackward, deadline, onEvent)
 	logFetchResults("address interactions", results)
 
 	return nil
 }
 
 // logFetchResults logs summary of fetch operations
-func logFetchResults(label string, results []ContinuousFetchSummary) {
+func logFetchResults(label string, results []fetcher.ContinuousFetchSummary) {
 	var total int
 	var errors int
 	var skipped int
@@ -151,7 +175,7 @@ func logFetchResults(label string, results []ContinuousFetchSummary) {
 }
 
 // getAddressAuthorRelays extracts the author pubkey from address and returns their relays
-func getAddressAuthorRelays(ctx context.Context, address string) []string {
+func (s *Syncer) getAddressAuthorRelays(ctx context.Context, address string) []string {
 	// Address format: kind:pubkey:d-tag
 	parts := strings.Split(address, ":")
 	if len(parts) < 2 {
@@ -163,19 +187,19 @@ func getAddressAuthorRelays(ctx context.Context, address string) []string {
 		return nil
 	}
 
-	relays, _ := getUserNIP65Relays(ctx, pubkey)
+	relays, _ := GetUserNIP65Relays(ctx, s.storageRelays, pubkey)
 	return relays
 }
 
 // getEventAuthorRelays fetches the event to get its author, then returns the author's relays
-func getEventAuthorRelays(ctx context.Context, eventID string, fallbackRelays []string) []string {
+func (s *Syncer) getEventAuthorRelays(ctx context.Context, eventID string, fallbackRelays []string) []string {
 	// First try local DB
 	filter := nostr.Filter{IDs: []string{eventID}}
-	ch, err := db.QueryEvents(ctx, filter)
+	ch, err := s.db.QueryEvents(ctx, filter)
 	if err == nil {
 		for event := range ch {
 			if event != nil {
-				relays, _ := getUserNIP65Relays(ctx, event.PubKey)
+				relays, _ := GetUserNIP65Relays(ctx, s.storageRelays, event.PubKey)
 				return relays
 			}
 		}
@@ -195,30 +219,9 @@ func getEventAuthorRelays(ctx context.Context, eventID string, fallbackRelays []
 			continue
 		}
 
-		relays, _ := getUserNIP65Relays(ctx, events[0].PubKey)
+		relays, _ := GetUserNIP65Relays(ctx, s.storageRelays, events[0].PubKey)
 		return relays
 	}
 
 	return nil
-}
-
-// mergeRelays combines two relay lists into a unique set
-func mergeRelays(a, b []string) []string {
-	seen := make(map[string]bool)
-	var result []string
-
-	for _, r := range a {
-		if !seen[r] {
-			seen[r] = true
-			result = append(result, r)
-		}
-	}
-	for _, r := range b {
-		if !seen[r] {
-			seen[r] = true
-			result = append(result, r)
-		}
-	}
-
-	return result
 }

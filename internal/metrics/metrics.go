@@ -1,8 +1,9 @@
-package main
+package metrics
 
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -10,6 +11,11 @@ import (
 
 	"github.com/nbd-wtf/go-nostr"
 )
+
+// EventStore interface for querying events
+type EventStore interface {
+	QueryEvents(ctx context.Context, filter nostr.Filter) (chan *nostr.Event, error)
+}
 
 // extractAmountFromZapRequest parses the embedded kind 9734 JSON and extracts the amount
 func extractAmountFromZapRequest(descriptionJSON string) int64 {
@@ -56,8 +62,8 @@ func extractAmountFromNutzap(event *nostr.Event) int64 {
 	return totalAmount
 }
 
-// computeUserMetricsFromDB computes kind 30382 metrics for a pubkey from local DB
-func computeUserMetricsFromDB(ctx context.Context, pubkey string) map[string]string {
+// ComputeUserMetrics computes kind 30382 metrics for a pubkey from local DB
+func ComputeUserMetrics(ctx context.Context, db EventStore, pubkey string) map[string]string {
 	metrics := make(map[string]string)
 
 	var (
@@ -270,7 +276,7 @@ func computeUserMetricsFromDB(ctx context.Context, pubkey string) map[string]str
 	activeStart, activeEnd := findActiveHoursRange(hourCounts)
 
 	// Calculate rank
-	rank := calculateUserRank(followerCount, postCount, zapAmountRecd, zapCountRecd)
+	rank := CalculateUserRank(followerCount, postCount, zapAmountRecd, zapCountRecd)
 
 	// Build metrics map
 	metrics["followers"] = strconv.Itoa(followerCount)
@@ -370,8 +376,8 @@ func findActiveHoursRange(hourCounts []int) (start, end int) {
 	return start, end
 }
 
-// computeEventMetricsFromDB computes kind 30383 metrics for an event ID from local DB
-func computeEventMetricsFromDB(ctx context.Context, eventID string) map[string]string {
+// ComputeEventMetrics computes kind 30383 metrics for an event ID from local DB
+func ComputeEventMetrics(ctx context.Context, db EventStore, eventID string) map[string]string {
 	metrics := make(map[string]string)
 
 	var (
@@ -463,7 +469,7 @@ func computeEventMetricsFromDB(ctx context.Context, eventID string) map[string]s
 	}
 
 	// Calculate rank
-	rank := calculateEventRank(commentCount, quoteCount, repostCount, reactionCount, zapCount, zapAmount)
+	rank := CalculateEventRank(commentCount, quoteCount, repostCount, reactionCount, zapCount, zapAmount)
 
 	metrics["comment_cnt"] = strconv.Itoa(commentCount)
 	metrics["quote_cnt"] = strconv.Itoa(quoteCount)
@@ -476,8 +482,8 @@ func computeEventMetricsFromDB(ctx context.Context, eventID string) map[string]s
 	return metrics
 }
 
-// computeAddressMetricsFromDB computes kind 30384 metrics for an address from local DB
-func computeAddressMetricsFromDB(ctx context.Context, address string) map[string]string {
+// ComputeAddressMetrics computes kind 30384 metrics for an address from local DB
+func ComputeAddressMetrics(ctx context.Context, db EventStore, address string) map[string]string {
 	metrics := make(map[string]string)
 
 	var (
@@ -548,7 +554,7 @@ func computeAddressMetricsFromDB(ctx context.Context, address string) map[string
 		zapAmount += extractAmountFromNutzap(event)
 	}
 
-	rank := calculateEventRank(commentCount, quoteCount, repostCount, reactionCount, zapCount, zapAmount)
+	rank := CalculateEventRank(commentCount, quoteCount, repostCount, reactionCount, zapCount, zapAmount)
 
 	metrics["comment_cnt"] = strconv.Itoa(commentCount)
 	metrics["quote_cnt"] = strconv.Itoa(quoteCount)
@@ -559,4 +565,49 @@ func computeAddressMetricsFromDB(ctx context.Context, address string) map[string
 	metrics["rank"] = strconv.Itoa(rank)
 
 	return metrics
+}
+
+// CalculateUserRank computes a normalized 0-100 rank for a user
+func CalculateUserRank(followers, posts int, zapAmount int64, zapCount int) int {
+	score := float64(followers)*1.0 +
+		float64(posts)*0.5 +
+		float64(zapAmount)*0.001 +
+		float64(zapCount)*2.0
+
+	if score <= 0 {
+		return 0
+	}
+
+	// Log scale normalization (assumes max score ~1M)
+	rank := int((math.Log10(score) / 6.0) * 100)
+	if rank > 100 {
+		rank = 100
+	}
+	if rank < 0 {
+		rank = 0
+	}
+	return rank
+}
+
+// CalculateEventRank computes a normalized 0-100 rank for an event
+func CalculateEventRank(comments, quotes, reposts, reactions, zaps int, zapAmount int64) int {
+	score := float64(comments)*3.0 +
+		float64(quotes)*5.0 +
+		float64(reposts)*2.0 +
+		float64(reactions)*1.0 +
+		float64(zaps)*4.0 +
+		float64(zapAmount)*0.01
+
+	if score <= 0 {
+		return 0
+	}
+
+	rank := int((math.Log10(score) / 4.0) * 100)
+	if rank > 100 {
+		rank = 100
+	}
+	if rank < 0 {
+		rank = 0
+	}
+	return rank
 }

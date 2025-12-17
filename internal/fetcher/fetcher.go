@@ -1,4 +1,4 @@
-package main
+package fetcher
 
 import (
 	"context"
@@ -17,8 +17,8 @@ const (
 	DefaultFetchLimit   = 500
 )
 
-// FetchConfig holds fetcher configuration
-type FetchConfig struct {
+// Config holds fetcher configuration
+type Config struct {
 	TTL          time.Duration
 	FetchTimeout time.Duration
 	FetchLimit   int
@@ -27,11 +27,11 @@ type FetchConfig struct {
 // EventFetcher handles event fetching from relays with cursor-based pagination
 type EventFetcher struct {
 	cursorStore *CursorStore
-	config      FetchConfig
+	config      Config
 }
 
 // NewEventFetcher creates a new event fetcher
-func NewEventFetcher(cursorStore *CursorStore, cfg FetchConfig) *EventFetcher {
+func NewEventFetcher(cursorStore *CursorStore, cfg Config) *EventFetcher {
 	if cfg.TTL == 0 {
 		cfg.TTL = DefaultTTL
 	}

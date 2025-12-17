@@ -1,4 +1,4 @@
-package main
+package fetcher
 
 import (
 	"crypto/sha256"
