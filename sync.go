@@ -5,13 +5,14 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/nbd-wtf/go-nostr"
 )
 
-// syncUserEvents triggers Dacite to fetch and store events for computing user metrics
+// syncUserEvents fetches and stores events for computing user metrics
 func syncUserEvents(ctx context.Context, pubkey string, userRelays []string) error {
-	log.Printf("[sync] Fetching events for %s via Dacite...", pubkey[:16]+"...")
+	log.Printf("[sync] Fetching events for %s...", pubkey[:16]+"...")
 
 	// Filters for user's own relays
 	userFilters := []nostr.Filter{
@@ -32,33 +33,43 @@ func syncUserEvents(ctx context.Context, pubkey string, userRelays []string) err
 		{Kinds: []int{1984}, Tags: nostr.TagMap{"p": []string{pubkey}}}, // Reports received
 	}
 
+	deadline := time.Now().Add(30 * time.Second)
+
+	// Event handler to store events - must be thread-safe
+	var storeMu sync.Mutex
+	onEvent := func(event *nostr.Event) {
+		storeMu.Lock()
+		defer storeMu.Unlock()
+		if err := db.SaveEvent(ctx, event); err != nil {
+			log.Printf("[sync] Failed to store event: %v", err)
+		}
+	}
+
 	// Fetch in parallel
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	go func() {
 		defer wg.Done()
-		if _, err := triggerDaciteFetch(ctx, userRelays, userFilters); err != nil {
-			log.Printf("[sync] Dacite fetch (user relays) failed: %v", err)
-		}
+		results := fetcher.FetchAllContinuously(ctx, userRelays, userFilters, FetchBackward, deadline, onEvent)
+		logFetchResults("user relays", results)
 	}()
 
 	go func() {
 		defer wg.Done()
-		if _, err := triggerDaciteFetch(ctx, reportRelays, reportFilters); err != nil {
-			log.Printf("[sync] Dacite fetch (reports) failed: %v", err)
-		}
+		results := fetcher.FetchAllContinuously(ctx, reportRelays, reportFilters, FetchBackward, deadline, onEvent)
+		logFetchResults("reports", results)
 	}()
 
 	wg.Wait()
 
-	log.Printf("[sync] Dacite fetch completed for %s", pubkey[:16]+"...")
+	log.Printf("[sync] Fetch completed for %s", pubkey[:16]+"...")
 	return nil
 }
 
-// syncEventInteractions triggers Dacite to fetch and store interactions for an event
+// syncEventInteractions fetches interactions for an event
 func syncEventInteractions(ctx context.Context, eventID string) error {
-	log.Printf("[sync] Fetching interactions for event %s via Dacite...", eventID[:16]+"...")
+	log.Printf("[sync] Fetching interactions for event %s...", eventID[:16]+"...")
 
 	filters := []nostr.Filter{
 		{Kinds: []int{1}, Tags: nostr.TagMap{"e": []string{eventID}}},    // Replies
@@ -75,17 +86,23 @@ func syncEventInteractions(ctx context.Context, eventID string) error {
 	authorRelays := getEventAuthorRelays(ctx, eventID, popularRelays)
 	relays := mergeRelays(popularRelays, authorRelays)
 
-	if _, err := triggerDaciteFetch(ctx, relays, filters); err != nil {
-		log.Printf("[sync] Dacite fetch failed: %v", err)
-		return err
+	deadline := time.Now().Add(30 * time.Second)
+
+	onEvent := func(event *nostr.Event) {
+		if err := db.SaveEvent(ctx, event); err != nil {
+			log.Printf("[sync] Failed to store event: %v", err)
+		}
 	}
+
+	results := fetcher.FetchAllContinuously(ctx, relays, filters, FetchBackward, deadline, onEvent)
+	logFetchResults("event interactions", results)
 
 	return nil
 }
 
-// syncAddressInteractions triggers Dacite to fetch and store interactions for an addressable event
+// syncAddressInteractions fetches interactions for an addressable event
 func syncAddressInteractions(ctx context.Context, address string) error {
-	log.Printf("[sync] Fetching interactions for address %s via Dacite...", address)
+	log.Printf("[sync] Fetching interactions for address %s...", address)
 
 	filters := []nostr.Filter{
 		{Kinds: []int{1}, Tags: nostr.TagMap{"a": []string{address}}},     // Comments
@@ -101,12 +118,36 @@ func syncAddressInteractions(ctx context.Context, address string) error {
 	authorRelays := getAddressAuthorRelays(ctx, address)
 	relays := mergeRelays(popularRelays, authorRelays)
 
-	if _, err := triggerDaciteFetch(ctx, relays, filters); err != nil {
-		log.Printf("[sync] Dacite fetch failed: %v", err)
-		return err
+	deadline := time.Now().Add(30 * time.Second)
+
+	onEvent := func(event *nostr.Event) {
+		if err := db.SaveEvent(ctx, event); err != nil {
+			log.Printf("[sync] Failed to store event: %v", err)
+		}
 	}
 
+	results := fetcher.FetchAllContinuously(ctx, relays, filters, FetchBackward, deadline, onEvent)
+	logFetchResults("address interactions", results)
+
 	return nil
+}
+
+// logFetchResults logs summary of fetch operations
+func logFetchResults(label string, results []ContinuousFetchSummary) {
+	var total int
+	var errors int
+	var skipped int
+	for _, r := range results {
+		total += r.Total
+		if r.Error != nil {
+			errors++
+		}
+		if r.SkippedTTL {
+			skipped++
+		}
+	}
+	log.Printf("[sync] %s: fetched %d events from %d relays (%d errors, %d skipped TTL)",
+		label, total, len(results), errors, skipped)
 }
 
 // getAddressAuthorRelays extracts the author pubkey from address and returns their relays

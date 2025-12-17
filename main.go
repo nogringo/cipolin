@@ -5,6 +5,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"time"
 
 	"github.com/fiatjaf/eventstore/badger"
 	"github.com/fiatjaf/khatru"
@@ -17,32 +19,50 @@ var (
 	servicePubKey     string
 	db                *badger.BadgerBackend
 	config            Config
+	fetcher           *EventFetcher
 )
 
 type Config struct {
 	PrivateKey    string
 	Port          string
-	DaciteURL     string
 	StorageRelays []string
 	DBPath        string
+	FetchTTL      time.Duration
+	FetchTimeout  time.Duration
 }
 
 func loadConfig() Config {
 	cfg := Config{
-		PrivateKey:    os.Getenv("NIP85_PRIVATE_KEY"),
-		Port:          os.Getenv("PORT"),
-		DaciteURL:     os.Getenv("DACITE_URL"),
-		DBPath:        os.Getenv("DB_PATH"),
+		PrivateKey: os.Getenv("NIP85_PRIVATE_KEY"),
+		Port:       os.Getenv("PORT"),
+		DBPath:     os.Getenv("DB_PATH"),
 	}
 
 	if cfg.Port == "" {
 		cfg.Port = "3334"
 	}
-	if cfg.DaciteURL == "" {
-		cfg.DaciteURL = "http://localhost:8090"
-	}
 	if cfg.DBPath == "" {
 		cfg.DBPath = "./data/cipolin.db"
+	}
+
+	// Parse fetch TTL
+	if ttlStr := os.Getenv("FETCH_TTL_SECONDS"); ttlStr != "" {
+		if ttl, err := strconv.Atoi(ttlStr); err == nil {
+			cfg.FetchTTL = time.Duration(ttl) * time.Second
+		}
+	}
+	if cfg.FetchTTL == 0 {
+		cfg.FetchTTL = DefaultTTL
+	}
+
+	// Parse fetch timeout
+	if timeoutStr := os.Getenv("FETCH_TIMEOUT_SECONDS"); timeoutStr != "" {
+		if timeout, err := strconv.Atoi(timeoutStr); err == nil {
+			cfg.FetchTimeout = time.Duration(timeout) * time.Second
+		}
+	}
+	if cfg.FetchTimeout == 0 {
+		cfg.FetchTimeout = DefaultFetchTimeout
 	}
 
 	// Parse storage relays
@@ -81,12 +101,23 @@ func main() {
 	log.Printf("Service provider pubkey: %s", servicePubKey)
 
 	// Initialize database
-	db = &badger.BadgerBackend{Path: config.DBPath}
+	db = &badger.BadgerBackend{
+		Path:     config.DBPath,
+		MaxLimit: 10_000_000, // High limit for metrics computation (default is 1000)
+	}
 	if err := db.Init(); err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 	defer db.Close()
 	log.Printf("Database initialized at %s", config.DBPath)
+
+	// Initialize cursor store and event fetcher
+	cursorStore := NewCursorStore(db.DB)
+	fetcher = NewEventFetcher(cursorStore, FetchConfig{
+		TTL:          config.FetchTTL,
+		FetchTimeout: config.FetchTimeout,
+	})
+	log.Printf("Event fetcher initialized (TTL: %v, Timeout: %v)", config.FetchTTL, config.FetchTimeout)
 
 	// Create relay
 	relay := khatru.NewRelay()
@@ -122,7 +153,6 @@ func main() {
 	relay.Negentropy = true
 
 	log.Printf("Starting NIP-85 relay on :%s", config.Port)
-	log.Printf("Dacite API: %s", config.DaciteURL)
 	log.Printf("Storage relays: %v", config.StorageRelays)
 
 	if err := http.ListenAndServe(":"+config.Port, relay); err != nil {
