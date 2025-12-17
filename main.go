@@ -98,21 +98,25 @@ func main() {
 	// Use database for storage
 	relay.StoreEvent = append(relay.StoreEvent, db.SaveEvent)
 	relay.DeleteEvent = append(relay.DeleteEvent, db.DeleteEvent)
-	relay.QueryEvents = append(relay.QueryEvents, db.QueryEvents)
 
-	// Register NIP-85 query handler (runs before DB query)
+	// Wrap DB query to skip NIP-85 kinds (we generate them on-demand)
+	relay.QueryEvents = append(relay.QueryEvents, func(ctx context.Context, filter nostr.Filter) (chan *nostr.Event, error) {
+		// Skip if only querying NIP-85 kinds
+		if isOnlyNIP85Kinds(filter.Kinds) {
+			ch := make(chan *nostr.Event)
+			close(ch)
+			return ch, nil
+		}
+		return db.QueryEvents(ctx, filter)
+	})
+
+	// Register NIP-85 query handler (generates fresh assertions)
 	relay.QueryEvents = append(
 		[]func(ctx context.Context, filter nostr.Filter) (chan *nostr.Event, error){handleNIP85Query},
 		relay.QueryEvents...,
 	)
 
-	// Reject external events - only accept our own assertions
-	relay.RejectEvent = append(relay.RejectEvent, func(_ context.Context, event *nostr.Event) (bool, string) {
-		if event.PubKey != servicePubKey {
-			return true, "this relay only serves NIP-85 assertions from this provider"
-		}
-		return false, ""
-	})
+	// Accept all events - Dacite will publish fetched events here
 
 	// Enable negentropy support
 	relay.Negentropy = true

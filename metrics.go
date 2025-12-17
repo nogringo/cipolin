@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -13,15 +15,23 @@ func computeUserMetricsFromDB(ctx context.Context, pubkey string) map[string]str
 	metrics := make(map[string]string)
 
 	var (
-		followerCount  int
-		postCount      int
-		replyCount     int
-		reactionCount  int
-		zapAmountRecd  int64
-		zapAmountSent  int64
-		zapCountRecd   int
-		zapCountSent   int
-		firstCreatedAt int64 = time.Now().Unix()
+		followerCount    int
+		postCount        int
+		replyCount       int
+		reactionCount    int
+		zapAmountRecd    int64
+		zapAmountSent    int64
+		zapCountRecd     int
+		zapCountSent     int
+		reportsRecdCount int
+		reportsSentCount int
+		firstCreatedAt   int64 = time.Now().Unix()
+		topicCounts            = make(map[string]int)
+		hourCounts             = make([]int, 24)
+		oldestZapRecd    int64 = time.Now().Unix()
+		newestZapRecd    int64 = 0
+		oldestZapSent    int64 = time.Now().Unix()
+		newestZapSent    int64 = 0
 	)
 
 	// Count followers (kind 3 contact lists with p tag)
@@ -41,8 +51,21 @@ func computeUserMetricsFromDB(ctx context.Context, pubkey string) map[string]str
 	}
 	postCh, _ := db.QueryEvents(ctx, postFilter)
 	for event := range postCh {
-		if event.CreatedAt.Time().Unix() < firstCreatedAt {
-			firstCreatedAt = event.CreatedAt.Time().Unix()
+		ts := event.CreatedAt.Time().Unix()
+		if ts < firstCreatedAt {
+			firstCreatedAt = ts
+		}
+
+		// Track active hours
+		hour := event.CreatedAt.Time().UTC().Hour()
+		hourCounts[hour]++
+
+		// Extract topics (t tags)
+		for _, tag := range event.Tags {
+			if len(tag) >= 2 && tag[0] == "t" {
+				topic := strings.ToLower(tag[1])
+				topicCounts[topic]++
+			}
 		}
 
 		// Check if it's a reply (has e tag)
@@ -78,6 +101,13 @@ func computeUserMetricsFromDB(ctx context.Context, pubkey string) map[string]str
 	zapRecdCh, _ := db.QueryEvents(ctx, zapRecdFilter)
 	for event := range zapRecdCh {
 		zapCountRecd++
+		ts := event.CreatedAt.Time().Unix()
+		if ts < oldestZapRecd {
+			oldestZapRecd = ts
+		}
+		if ts > newestZapRecd {
+			newestZapRecd = ts
+		}
 		for _, tag := range event.Tags {
 			if len(tag) >= 2 && tag[0] == "amount" {
 				if amt, err := strconv.ParseInt(tag[1], 10, 64); err == nil {
@@ -95,6 +125,13 @@ func computeUserMetricsFromDB(ctx context.Context, pubkey string) map[string]str
 	zapSentCh, _ := db.QueryEvents(ctx, zapSentFilter)
 	for event := range zapSentCh {
 		zapCountSent++
+		ts := event.CreatedAt.Time().Unix()
+		if ts < oldestZapSent {
+			oldestZapSent = ts
+		}
+		if ts > newestZapSent {
+			newestZapSent = ts
+		}
 		for _, tag := range event.Tags {
 			if len(tag) >= 2 && tag[0] == "amount" {
 				if amt, err := strconv.ParseInt(tag[1], 10, 64); err == nil {
@@ -103,6 +140,49 @@ func computeUserMetricsFromDB(ctx context.Context, pubkey string) map[string]str
 			}
 		}
 	}
+
+	// Count reports received (kind 1984 with p tag)
+	reportsRecdFilter := nostr.Filter{
+		Kinds: []int{1984},
+		Tags:  nostr.TagMap{"p": []string{pubkey}},
+	}
+	reportsRecdCh, _ := db.QueryEvents(ctx, reportsRecdFilter)
+	for range reportsRecdCh {
+		reportsRecdCount++
+	}
+
+	// Count reports sent (kind 1984 by author)
+	reportsSentFilter := nostr.Filter{
+		Authors: []string{pubkey},
+		Kinds:   []int{1984},
+	}
+	reportsSentCh, _ := db.QueryEvents(ctx, reportsSentFilter)
+	for range reportsSentCh {
+		reportsSentCount++
+	}
+
+	// Calculate average zap per day
+	var zapAvgAmtDayRecd, zapAvgAmtDaySent int64
+	if newestZapRecd > oldestZapRecd {
+		days := (newestZapRecd - oldestZapRecd) / 86400
+		if days < 1 {
+			days = 1
+		}
+		zapAvgAmtDayRecd = zapAmountRecd / days
+	}
+	if newestZapSent > oldestZapSent {
+		days := (newestZapSent - oldestZapSent) / 86400
+		if days < 1 {
+			days = 1
+		}
+		zapAvgAmtDaySent = zapAmountSent / days
+	}
+
+	// Find top topics (up to 5)
+	topTopics := getTopTopics(topicCounts, 5)
+
+	// Find active hours range
+	activeStart, activeEnd := findActiveHoursRange(hourCounts)
 
 	// Calculate rank
 	rank := calculateUserRank(followerCount, postCount, zapAmountRecd, zapCountRecd)
@@ -118,8 +198,91 @@ func computeUserMetricsFromDB(ctx context.Context, pubkey string) map[string]str
 	metrics["zap_amt_sent"] = strconv.FormatInt(zapAmountSent, 10)
 	metrics["zap_cnt_recd"] = strconv.Itoa(zapCountRecd)
 	metrics["zap_cnt_sent"] = strconv.Itoa(zapCountSent)
+	metrics["zap_avg_amt_day_recd"] = strconv.FormatInt(zapAvgAmtDayRecd, 10)
+	metrics["zap_avg_amt_day_sent"] = strconv.FormatInt(zapAvgAmtDaySent, 10)
+	metrics["reports_cnt_recd"] = strconv.Itoa(reportsRecdCount)
+	metrics["reports_cnt_sent"] = strconv.Itoa(reportsSentCount)
+	metrics["active_hours_start"] = strconv.Itoa(activeStart)
+	metrics["active_hours_end"] = strconv.Itoa(activeEnd)
+
+	// Add topics as comma-separated (handler will split into multiple tags)
+	if len(topTopics) > 0 {
+		metrics["_topics"] = strings.Join(topTopics, ",")
+	}
 
 	return metrics
+}
+
+// getTopTopics returns the top N topics by count
+func getTopTopics(topicCounts map[string]int, n int) []string {
+	type kv struct {
+		Key   string
+		Value int
+	}
+	var sorted []kv
+	for k, v := range topicCounts {
+		sorted = append(sorted, kv{k, v})
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Value > sorted[j].Value
+	})
+
+	var result []string
+	for i := 0; i < len(sorted) && i < n; i++ {
+		result = append(result, sorted[i].Key)
+	}
+	return result
+}
+
+// findActiveHoursRange finds the range of hours with most activity
+func findActiveHoursRange(hourCounts []int) (start, end int) {
+	if len(hourCounts) != 24 {
+		return 0, 24
+	}
+
+	// Find the peak hour
+	maxCount := 0
+	peakHour := 0
+	for h, count := range hourCounts {
+		if count > maxCount {
+			maxCount = count
+			peakHour = h
+		}
+	}
+
+	if maxCount == 0 {
+		return 0, 24
+	}
+
+	// Expand from peak to find active range (>25% of peak activity)
+	threshold := maxCount / 4
+	start = peakHour
+	end = peakHour
+
+	// Expand backward
+	for i := 1; i < 12; i++ {
+		h := (peakHour - i + 24) % 24
+		if hourCounts[h] >= threshold {
+			start = h
+		} else {
+			break
+		}
+	}
+
+	// Expand forward
+	for i := 1; i < 12; i++ {
+		h := (peakHour + i) % 24
+		if hourCounts[h] >= threshold {
+			end = h
+		} else {
+			break
+		}
+	}
+
+	// Convert to end of hour
+	end = (end + 1) % 24
+
+	return start, end
 }
 
 // computeEventMetricsFromDB computes kind 30383 metrics for an event ID from local DB

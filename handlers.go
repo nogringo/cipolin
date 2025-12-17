@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"strings"
 
 	"github.com/nbd-wtf/go-nostr"
 )
@@ -52,11 +53,7 @@ func handleNIP85Query(ctx context.Context, filter nostr.Filter) (chan *nostr.Eve
 				}
 
 				if event != nil {
-					// Store the generated assertion locally
-					if err := db.SaveEvent(ctx, event); err != nil {
-						log.Printf("[handler] Failed to store assertion: %v", err)
-					}
-
+					log.Printf("[handler] Sending event %s (kind %d) for subject %s", event.ID[:16]+"...", event.Kind, subject[:16]+"...")
 					select {
 					case ch <- event:
 					case <-ctx.Done():
@@ -98,22 +95,46 @@ func generateUserAssertion(ctx context.Context, pubkey string) (*nostr.Event, er
 		log.Printf("[handler] Sync failed: %v", err)
 	}
 
+	log.Printf("[handler] Computing metrics for %s...", pubkey[:16]+"...")
+
 	// Compute metrics from local DB
 	metrics := computeUserMetricsFromDB(ctx, pubkey)
 
-	// Build assertion event
+	log.Printf("[handler] Metrics computed for %s, building event...", pubkey[:16]+"...")
+
+	// Build assertion event with tags in NIP-85 order
 	event := &nostr.Event{
 		Kind: KindUserAssertion,
 		Tags: nostr.Tags{
 			{"d", pubkey},
 			{"p", pubkey},
+			{"followers", metrics["followers"]},
+			{"rank", metrics["rank"]},
+			{"first_created_at", metrics["first_created_at"]},
+			{"post_cnt", metrics["post_cnt"]},
+			{"reply_cnt", metrics["reply_cnt"]},
+			{"reactions_cnt", metrics["reactions_cnt"]},
+			{"zap_amt_recd", metrics["zap_amt_recd"]},
+			{"zap_amt_sent", metrics["zap_amt_sent"]},
+			{"zap_cnt_recd", metrics["zap_cnt_recd"]},
+			{"zap_cnt_sent", metrics["zap_cnt_sent"]},
+			{"zap_avg_amt_day_recd", metrics["zap_avg_amt_day_recd"]},
+			{"zap_avg_amt_day_sent", metrics["zap_avg_amt_day_sent"]},
+			{"reports_cnt_recd", metrics["reports_cnt_recd"]},
+			{"reports_cnt_sent", metrics["reports_cnt_sent"]},
+			{"active_hours_start", metrics["active_hours_start"]},
+			{"active_hours_end", metrics["active_hours_end"]},
 		},
 		Content: "",
 	}
 
-	// Add metric tags
-	for key, value := range metrics {
-		event.Tags = append(event.Tags, nostr.Tag{key, value})
+	// Add topic tags
+	if topics, ok := metrics["_topics"]; ok && topics != "" {
+		for _, topic := range strings.Split(topics, ",") {
+			if topic != "" {
+				event.Tags = append(event.Tags, nostr.Tag{"t", topic})
+			}
+		}
 	}
 
 	if err := signEvent(event); err != nil {
@@ -139,17 +160,21 @@ func generateEventAssertion(ctx context.Context, eventID string) (*nostr.Event, 
 	// Compute metrics from local DB
 	metrics := computeEventMetricsFromDB(ctx, eventID)
 
+	// Build assertion event with tags in NIP-85 order
 	event := &nostr.Event{
 		Kind: KindEventAssertion,
 		Tags: nostr.Tags{
 			{"d", eventID},
 			{"e", eventID},
+			{"comment_cnt", metrics["comment_cnt"]},
+			{"quote_cnt", metrics["quote_cnt"]},
+			{"repost_cnt", metrics["repost_cnt"]},
+			{"reaction_cnt", metrics["reaction_cnt"]},
+			{"zap_cnt", metrics["zap_cnt"]},
+			{"zap_amount", metrics["zap_amount"]},
+			{"rank", metrics["rank"]},
 		},
 		Content: "",
-	}
-
-	for key, value := range metrics {
-		event.Tags = append(event.Tags, nostr.Tag{key, value})
 	}
 
 	if err := signEvent(event); err != nil {
@@ -171,17 +196,21 @@ func generateAddressAssertion(ctx context.Context, address string) (*nostr.Event
 	// Compute metrics from local DB
 	metrics := computeAddressMetricsFromDB(ctx, address)
 
+	// Build assertion event with tags in NIP-85 order
 	event := &nostr.Event{
 		Kind: KindAddressAssertion,
 		Tags: nostr.Tags{
 			{"d", address},
 			{"a", address},
+			{"comment_cnt", metrics["comment_cnt"]},
+			{"quote_cnt", metrics["quote_cnt"]},
+			{"repost_cnt", metrics["repost_cnt"]},
+			{"reaction_cnt", metrics["reaction_cnt"]},
+			{"zap_cnt", metrics["zap_cnt"]},
+			{"zap_amount", metrics["zap_amount"]},
+			{"rank", metrics["rank"]},
 		},
 		Content: "",
-	}
-
-	for key, value := range metrics {
-		event.Tags = append(event.Tags, nostr.Tag{key, value})
 	}
 
 	if err := signEvent(event); err != nil {

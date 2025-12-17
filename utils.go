@@ -80,3 +80,16 @@ func minInt(a, b int) int {
 	}
 	return b
 }
+
+// isOnlyNIP85Kinds checks if kinds slice only contains NIP-85 kinds
+func isOnlyNIP85Kinds(kinds []int) bool {
+	if len(kinds) == 0 {
+		return false
+	}
+	for _, k := range kinds {
+		if k != 30382 && k != 30383 && k != 30384 {
+			return false
+		}
+	}
+	return true
+}
