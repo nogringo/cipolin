@@ -46,6 +46,8 @@ func triggerDaciteFetch(ctx context.Context, relays []string, filters []nostr.Fi
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
+	log.Printf("[dacite] Request: %s", string(body))
+
 	url := config.DaciteURL + "/events/fetch"
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
@@ -97,9 +99,7 @@ func filterToMap(f nostr.Filter) map[string]any {
 	if f.Until != nil {
 		m["until"] = int64(*f.Until)
 	}
-	if f.Limit > 0 {
-		m["limit"] = f.Limit
-	}
+	// Don't send limit to Dacite
 
 	// Tag filters
 	for tag, values := range f.Tags {
@@ -109,6 +109,56 @@ func filterToMap(f nostr.Filter) map[string]any {
 	}
 
 	return m
+}
+
+// getPopularRelays fetches popular online relays from Breccia's kind 6301 events
+func getPopularRelays(ctx context.Context) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	filter := nostr.Filter{
+		Kinds: []int{6301},
+		Tags:  nostr.TagMap{"i": []string{"online-relays"}},
+		Limit: 1,
+	}
+
+	// Try each storage relay
+	for _, relayURL := range config.StorageRelays {
+		relay, err := nostr.RelayConnect(ctx, relayURL)
+		if err != nil {
+			continue
+		}
+
+		events, err := relay.QuerySync(ctx, filter)
+		relay.Close()
+
+		if err != nil || len(events) == 0 {
+			continue
+		}
+
+		// Parse relay list from content (JSON array)
+		var relays []string
+		if err := json.Unmarshal([]byte(events[0].Content), &relays); err != nil {
+			continue
+		}
+
+		if len(relays) > 0 {
+			// Limit to first 10 relays
+			if len(relays) > 10 {
+				relays = relays[:10]
+			}
+			log.Printf("[breccia] Fetched %d popular relays", len(relays))
+			return relays, nil
+		}
+	}
+
+	// Fallback to default relays
+	log.Printf("[breccia] Using fallback relays")
+	return []string{
+		"wss://relay.damus.io",
+		"wss://nos.lol",
+		"wss://relay.nostr.band",
+	}, nil
 }
 
 // getUserNIP65Relays fetches a user's relay list from storage relays

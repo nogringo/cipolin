@@ -67,6 +67,26 @@ func handleNIP85Query(ctx context.Context, filter nostr.Filter) (chan *nostr.Eve
 	return ch, nil
 }
 
+// publishToStorageRelays publishes an event to all storage relays
+func publishToStorageRelays(ctx context.Context, event *nostr.Event) {
+	for _, relayURL := range config.StorageRelays {
+		go func(url string) {
+			relay, err := nostr.RelayConnect(ctx, url)
+			if err != nil {
+				log.Printf("[publish] Failed to connect to %s: %v", url, err)
+				return
+			}
+			defer relay.Close()
+
+			if err := relay.Publish(ctx, *event); err != nil {
+				log.Printf("[publish] Failed to publish to %s: %v", url, err)
+				return
+			}
+			log.Printf("[publish] Published %s to %s", event.ID[:16]+"...", url)
+		}(relayURL)
+	}
+}
+
 func containsNIP85Kind(kinds []int) bool {
 	for _, k := range kinds {
 		if k == KindUserAssertion || k == KindEventAssertion || k == KindAddressAssertion {
@@ -141,6 +161,9 @@ func generateUserAssertion(ctx context.Context, pubkey string) (*nostr.Event, er
 		return nil, err
 	}
 
+	// Publish to storage relays
+	publishToStorageRelays(ctx, event)
+
 	return event, nil
 }
 
@@ -181,6 +204,9 @@ func generateEventAssertion(ctx context.Context, eventID string) (*nostr.Event, 
 		return nil, err
 	}
 
+	// Publish to storage relays
+	publishToStorageRelays(ctx, event)
+
 	return event, nil
 }
 
@@ -217,6 +243,8 @@ func generateAddressAssertion(ctx context.Context, address string) (*nostr.Event
 		return nil, err
 	}
 
+	// Publish to storage relays
+	publishToStorageRelays(ctx, event)
+
 	return event, nil
 }
-

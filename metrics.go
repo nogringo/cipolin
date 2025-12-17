@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"sort"
 	"strconv"
 	"strings"
@@ -9,6 +10,51 @@ import (
 
 	"github.com/nbd-wtf/go-nostr"
 )
+
+// extractAmountFromZapRequest parses the embedded kind 9734 JSON and extracts the amount
+func extractAmountFromZapRequest(descriptionJSON string) int64 {
+	var zapRequest struct {
+		Tags [][]string `json:"tags"`
+	}
+	if err := json.Unmarshal([]byte(descriptionJSON), &zapRequest); err != nil {
+		return 0
+	}
+	for _, tag := range zapRequest.Tags {
+		if len(tag) >= 2 && tag[0] == "amount" {
+			if amt, err := strconv.ParseInt(tag[1], 10, 64); err == nil {
+				return amt
+			}
+		}
+	}
+	return 0
+}
+
+// extractAmountFromNutzap extracts amount from Cashu proof tags in a nutzap event
+func extractAmountFromNutzap(event *nostr.Event) int64 {
+	var totalAmount int64
+	for _, tag := range event.Tags {
+		if len(tag) >= 2 && tag[0] == "proof" {
+			// Parse the Cashu proof JSON
+			var proofs []struct {
+				Amount int64 `json:"amount"`
+			}
+			if err := json.Unmarshal([]byte(tag[1]), &proofs); err != nil {
+				// Try single proof format
+				var singleProof struct {
+					Amount int64 `json:"amount"`
+				}
+				if err := json.Unmarshal([]byte(tag[1]), &singleProof); err == nil {
+					totalAmount += singleProof.Amount
+				}
+				continue
+			}
+			for _, proof := range proofs {
+				totalAmount += proof.Amount
+			}
+		}
+	}
+	return totalAmount
+}
 
 // computeUserMetricsFromDB computes kind 30382 metrics for a pubkey from local DB
 func computeUserMetricsFromDB(ctx context.Context, pubkey string) map[string]string {
@@ -108,19 +154,39 @@ func computeUserMetricsFromDB(ctx context.Context, pubkey string) map[string]str
 		if ts > newestZapRecd {
 			newestZapRecd = ts
 		}
+		// Get amount from description tag (embedded 9734)
 		for _, tag := range event.Tags {
-			if len(tag) >= 2 && tag[0] == "amount" {
-				if amt, err := strconv.ParseInt(tag[1], 10, 64); err == nil {
-					zapAmountRecd += amt / 1000 // msats to sats
-				}
+			if len(tag) >= 2 && tag[0] == "description" {
+				amount := extractAmountFromZapRequest(tag[1])
+				zapAmountRecd += amount / 1000 // msats to sats
+				break
 			}
 		}
 	}
 
-	// Count zaps sent (kind 9734 by author)
+	// Count nutzaps received (kind 9321 with p tag)
+	nutzapRecdFilter := nostr.Filter{
+		Kinds: []int{9321},
+		Tags:  nostr.TagMap{"p": []string{pubkey}},
+	}
+	nutzapRecdCh, _ := db.QueryEvents(ctx, nutzapRecdFilter)
+	for event := range nutzapRecdCh {
+		zapCountRecd++
+		ts := event.CreatedAt.Time().Unix()
+		if ts < oldestZapRecd {
+			oldestZapRecd = ts
+		}
+		if ts > newestZapRecd {
+			newestZapRecd = ts
+		}
+		zapAmountRecd += extractAmountFromNutzap(event)
+	}
+
+	// Count zaps sent (kind 9735 with P tag = sender pubkey)
+	// Note: kind 9734 is not published to relays, we use 9735 receipts with P tag
 	zapSentFilter := nostr.Filter{
-		Authors: []string{pubkey},
-		Kinds:   []int{9734},
+		Kinds: []int{9735},
+		Tags:  nostr.TagMap{"P": []string{pubkey}},
 	}
 	zapSentCh, _ := db.QueryEvents(ctx, zapSentFilter)
 	for event := range zapSentCh {
@@ -132,13 +198,32 @@ func computeUserMetricsFromDB(ctx context.Context, pubkey string) map[string]str
 		if ts > newestZapSent {
 			newestZapSent = ts
 		}
+		// Get amount from the description tag (embedded 9734 request)
 		for _, tag := range event.Tags {
-			if len(tag) >= 2 && tag[0] == "amount" {
-				if amt, err := strconv.ParseInt(tag[1], 10, 64); err == nil {
-					zapAmountSent += amt / 1000
-				}
+			if len(tag) >= 2 && tag[0] == "description" {
+				amount := extractAmountFromZapRequest(tag[1])
+				zapAmountSent += amount / 1000 // msats to sats
+				break
 			}
 		}
+	}
+
+	// Count nutzaps sent (kind 9321 by author)
+	nutzapSentFilter := nostr.Filter{
+		Authors: []string{pubkey},
+		Kinds:   []int{9321},
+	}
+	nutzapSentCh, _ := db.QueryEvents(ctx, nutzapSentFilter)
+	for event := range nutzapSentCh {
+		zapCountSent++
+		ts := event.CreatedAt.Time().Unix()
+		if ts < oldestZapSent {
+			oldestZapSent = ts
+		}
+		if ts > newestZapSent {
+			newestZapSent = ts
+		}
+		zapAmountSent += extractAmountFromNutzap(event)
 	}
 
 	// Count reports received (kind 1984 with p tag)
