@@ -383,14 +383,14 @@ func computeEventMetricsFromDB(ctx context.Context, eventID string) map[string]s
 		zapAmount     int64
 	)
 
-	// Comments/replies (kind 1 with e tag)
+	// Comments/replies (kind 1 with e tag, excluding quotes)
 	commentFilter := nostr.Filter{
 		Kinds: []int{1},
 		Tags:  nostr.TagMap{"e": []string{eventID}},
 	}
 	commentCh, _ := db.QueryEvents(ctx, commentFilter)
 	for event := range commentCh {
-		// Check if it's a quote (has q tag)
+		// Skip if it's a quote (has q tag for this event)
 		isQuote := false
 		for _, tag := range event.Tags {
 			if len(tag) >= 2 && tag[0] == "q" && tag[1] == eventID {
@@ -398,11 +398,19 @@ func computeEventMetricsFromDB(ctx context.Context, eventID string) map[string]s
 				break
 			}
 		}
-		if isQuote {
-			quoteCount++
-		} else {
+		if !isQuote {
 			commentCount++
 		}
+	}
+
+	// Quotes (kind 1 with q tag)
+	quoteFilter := nostr.Filter{
+		Kinds: []int{1},
+		Tags:  nostr.TagMap{"q": []string{eventID}},
+	}
+	quoteCh, _ := db.QueryEvents(ctx, quoteFilter)
+	for range quoteCh {
+		quoteCount++
 	}
 
 	// Reposts (kind 6)
