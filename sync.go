@@ -63,6 +63,7 @@ func syncEventInteractions(ctx context.Context, eventID string) error {
 		{Kinds: []int{6}, Tags: nostr.TagMap{"e": []string{eventID}}},    // Reposts
 		{Kinds: []int{7}, Tags: nostr.TagMap{"e": []string{eventID}}},    // Reactions
 		{Kinds: []int{9735}, Tags: nostr.TagMap{"e": []string{eventID}}}, // Zaps
+		{Kinds: []int{9321}, Tags: nostr.TagMap{"e": []string{eventID}}}, // Nutzaps
 	}
 
 	popularRelays, _ := getPopularRelays(ctx)
@@ -83,6 +84,7 @@ func syncAddressInteractions(ctx context.Context, address string) error {
 		{Kinds: []int{6, 16}, Tags: nostr.TagMap{"a": []string{address}}}, // Reposts
 		{Kinds: []int{7}, Tags: nostr.TagMap{"a": []string{address}}},     // Reactions
 		{Kinds: []int{9735}, Tags: nostr.TagMap{"a": []string{address}}},  // Zaps
+		{Kinds: []int{9321}, Tags: nostr.TagMap{"a": []string{address}}},  // Nutzaps
 	}
 
 	popularRelays, _ := getPopularRelays(ctx)

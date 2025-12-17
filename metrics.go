@@ -433,13 +433,25 @@ func computeEventMetricsFromDB(ctx context.Context, eventID string) map[string]s
 	zapCh, _ := db.QueryEvents(ctx, zapFilter)
 	for event := range zapCh {
 		zapCount++
+		// Get amount from description tag (embedded 9734)
 		for _, tag := range event.Tags {
-			if len(tag) >= 2 && tag[0] == "amount" {
-				if amt, err := strconv.ParseInt(tag[1], 10, 64); err == nil {
-					zapAmount += amt / 1000
-				}
+			if len(tag) >= 2 && tag[0] == "description" {
+				amount := extractAmountFromZapRequest(tag[1])
+				zapAmount += amount / 1000 // msats to sats
+				break
 			}
 		}
+	}
+
+	// Nutzaps (kind 9321)
+	nutzapFilter := nostr.Filter{
+		Kinds: []int{9321},
+		Tags:  nostr.TagMap{"e": []string{eventID}},
+	}
+	nutzapCh, _ := db.QueryEvents(ctx, nutzapFilter)
+	for event := range nutzapCh {
+		zapCount++
+		zapAmount += extractAmountFromNutzap(event)
 	}
 
 	// Calculate rank
@@ -507,13 +519,25 @@ func computeAddressMetricsFromDB(ctx context.Context, address string) map[string
 	zapCh, _ := db.QueryEvents(ctx, zapFilter)
 	for event := range zapCh {
 		zapCount++
+		// Get amount from description tag (embedded 9734)
 		for _, tag := range event.Tags {
-			if len(tag) >= 2 && tag[0] == "amount" {
-				if amt, err := strconv.ParseInt(tag[1], 10, 64); err == nil {
-					zapAmount += amt / 1000
-				}
+			if len(tag) >= 2 && tag[0] == "description" {
+				amount := extractAmountFromZapRequest(tag[1])
+				zapAmount += amount / 1000 // msats to sats
+				break
 			}
 		}
+	}
+
+	// Nutzaps (kind 9321)
+	nutzapFilter := nostr.Filter{
+		Kinds: []int{9321},
+		Tags:  nostr.TagMap{"a": []string{address}},
+	}
+	nutzapCh, _ := db.QueryEvents(ctx, nutzapFilter)
+	for event := range nutzapCh {
+		zapCount++
+		zapAmount += extractAmountFromNutzap(event)
 	}
 
 	rank := calculateEventRank(commentCount, quoteCount, repostCount, reactionCount, zapCount, zapAmount)
