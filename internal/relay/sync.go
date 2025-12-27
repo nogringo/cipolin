@@ -5,12 +5,19 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cipolin/internal/fetcher"
 
 	"github.com/nbd-wtf/go-nostr"
 )
+
+// SyncProgress tracks the progress of an async sync operation
+type SyncProgress struct {
+	EventCount int64
+	Done       chan struct{}
+}
 
 // EventStore interface for querying and saving events
 type EventStore interface {
@@ -89,6 +96,199 @@ func (s *Syncer) SyncUserEvents(ctx context.Context, pubkey string, userRelays [
 
 	log.Printf("[sync] Fetch completed for %s", pubkey[:16]+"...")
 	return nil
+}
+
+// SyncUserEventsAsync starts fetching events asynchronously and returns a progress tracker
+// Sync stops when context is cancelled (e.g., client disconnects)
+func (s *Syncer) SyncUserEventsAsync(ctx context.Context, pubkey string, userRelays []string) *SyncProgress {
+	progress := &SyncProgress{
+		Done: make(chan struct{}),
+	}
+
+	go func() {
+		defer close(progress.Done)
+
+		// Check if already cancelled
+		if ctx.Err() != nil {
+			log.Printf("[sync-async] Context already cancelled for %s", pubkey[:16]+"...")
+			return
+		}
+
+		log.Printf("[sync-async] Fetching events for %s...", pubkey[:16]+"...")
+
+		// Filters for user's own relays
+		userFilters := []nostr.Filter{
+			{Authors: []string{pubkey}, Kinds: []int{1}},                    // Posts/replies
+			{Authors: []string{pubkey}, Kinds: []int{7}},                    // Reactions
+			{Kinds: []int{3}, Tags: nostr.TagMap{"p": []string{pubkey}}},    // Followers
+			{Kinds: []int{9735}, Tags: nostr.TagMap{"p": []string{pubkey}}}, // Zaps received
+			{Kinds: []int{9735}, Tags: nostr.TagMap{"P": []string{pubkey}}}, // Zaps sent (P = sender)
+			{Kinds: []int{9321}, Tags: nostr.TagMap{"p": []string{pubkey}}}, // Nutzaps received
+			{Authors: []string{pubkey}, Kinds: []int{9321}},                 // Nutzaps sent
+		}
+
+		// Reports should be fetched from popular relays + user relays
+		popularRelays, _ := GetPopularRelays(ctx, s.storageRelays)
+		reportRelays := MergeRelays(popularRelays, userRelays)
+		reportFilters := []nostr.Filter{
+			{Authors: []string{pubkey}, Kinds: []int{1984}},                 // Reports sent
+			{Kinds: []int{1984}, Tags: nostr.TagMap{"p": []string{pubkey}}}, // Reports received
+		}
+
+		deadline := time.Now().Add(30 * time.Second)
+
+		// Event handler to store events and track count
+		var storeMu sync.Mutex
+		onEvent := func(event *nostr.Event) {
+			// Check context before storing
+			if ctx.Err() != nil {
+				return
+			}
+			storeMu.Lock()
+			defer storeMu.Unlock()
+			if err := s.db.SaveEvent(ctx, event); err != nil {
+				log.Printf("[sync-async] Failed to store event: %v", err)
+			}
+			atomic.AddInt64(&progress.EventCount, 1)
+		}
+
+		// Fetch in parallel
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			results := s.fetcher.FetchAllContinuously(ctx, userRelays, userFilters, fetcher.FetchBackward, deadline, onEvent)
+			if ctx.Err() == nil {
+				logFetchResults("user relays (async)", results)
+			}
+		}()
+
+		go func() {
+			defer wg.Done()
+			results := s.fetcher.FetchAllContinuously(ctx, reportRelays, reportFilters, fetcher.FetchBackward, deadline, onEvent)
+			if ctx.Err() == nil {
+				logFetchResults("reports (async)", results)
+			}
+		}()
+
+		wg.Wait()
+
+		if ctx.Err() != nil {
+			log.Printf("[sync-async] Sync cancelled for %s (fetched %d events before cancellation)", pubkey[:16]+"...", atomic.LoadInt64(&progress.EventCount))
+		} else {
+			log.Printf("[sync-async] Fetch completed for %s (total: %d events)", pubkey[:16]+"...", atomic.LoadInt64(&progress.EventCount))
+		}
+	}()
+
+	return progress
+}
+
+// SyncEventInteractionsAsync starts fetching event interactions asynchronously
+// Sync stops when context is cancelled (e.g., client disconnects)
+func (s *Syncer) SyncEventInteractionsAsync(ctx context.Context, eventID string) *SyncProgress {
+	progress := &SyncProgress{
+		Done: make(chan struct{}),
+	}
+
+	go func() {
+		defer close(progress.Done)
+
+		if ctx.Err() != nil {
+			return
+		}
+
+		log.Printf("[sync-async] Fetching interactions for event %s...", eventID[:16]+"...")
+
+		filters := []nostr.Filter{
+			{Kinds: []int{1}, Tags: nostr.TagMap{"e": []string{eventID}}},    // Replies
+			{Kinds: []int{1}, Tags: nostr.TagMap{"q": []string{eventID}}},    // Quotes
+			{Kinds: []int{6}, Tags: nostr.TagMap{"e": []string{eventID}}},    // Reposts
+			{Kinds: []int{7}, Tags: nostr.TagMap{"e": []string{eventID}}},    // Reactions
+			{Kinds: []int{9735}, Tags: nostr.TagMap{"e": []string{eventID}}}, // Zaps
+			{Kinds: []int{9321}, Tags: nostr.TagMap{"e": []string{eventID}}}, // Nutzaps
+		}
+
+		popularRelays, _ := GetPopularRelays(ctx, s.storageRelays)
+		authorRelays := s.getEventAuthorRelays(ctx, eventID, popularRelays)
+		relays := MergeRelays(popularRelays, authorRelays)
+
+		deadline := time.Now().Add(30 * time.Second)
+
+		onEvent := func(event *nostr.Event) {
+			if ctx.Err() != nil {
+				return
+			}
+			if err := s.db.SaveEvent(ctx, event); err != nil {
+				log.Printf("[sync-async] Failed to store event: %v", err)
+			}
+			atomic.AddInt64(&progress.EventCount, 1)
+		}
+
+		results := s.fetcher.FetchAllContinuously(ctx, relays, filters, fetcher.FetchBackward, deadline, onEvent)
+
+		if ctx.Err() != nil {
+			log.Printf("[sync-async] Sync cancelled for event %s", eventID[:16]+"...")
+		} else {
+			logFetchResults("event interactions (async)", results)
+			log.Printf("[sync-async] Fetch completed for event %s (total: %d events)", eventID[:16]+"...", atomic.LoadInt64(&progress.EventCount))
+		}
+	}()
+
+	return progress
+}
+
+// SyncAddressInteractionsAsync starts fetching address interactions asynchronously
+// Sync stops when context is cancelled (e.g., client disconnects)
+func (s *Syncer) SyncAddressInteractionsAsync(ctx context.Context, address string) *SyncProgress {
+	progress := &SyncProgress{
+		Done: make(chan struct{}),
+	}
+
+	go func() {
+		defer close(progress.Done)
+
+		if ctx.Err() != nil {
+			return
+		}
+
+		log.Printf("[sync-async] Fetching interactions for address %s...", address)
+
+		filters := []nostr.Filter{
+			{Kinds: []int{1}, Tags: nostr.TagMap{"a": []string{address}}},     // Comments
+			{Kinds: []int{6, 16}, Tags: nostr.TagMap{"a": []string{address}}}, // Reposts
+			{Kinds: []int{7}, Tags: nostr.TagMap{"a": []string{address}}},     // Reactions
+			{Kinds: []int{9735}, Tags: nostr.TagMap{"a": []string{address}}},  // Zaps
+			{Kinds: []int{9321}, Tags: nostr.TagMap{"a": []string{address}}},  // Nutzaps
+		}
+
+		popularRelays, _ := GetPopularRelays(ctx, s.storageRelays)
+		authorRelays := s.getAddressAuthorRelays(ctx, address)
+		relays := MergeRelays(popularRelays, authorRelays)
+
+		deadline := time.Now().Add(30 * time.Second)
+
+		onEvent := func(event *nostr.Event) {
+			if ctx.Err() != nil {
+				return
+			}
+			if err := s.db.SaveEvent(ctx, event); err != nil {
+				log.Printf("[sync-async] Failed to store event: %v", err)
+			}
+			atomic.AddInt64(&progress.EventCount, 1)
+		}
+
+		results := s.fetcher.FetchAllContinuously(ctx, relays, filters, fetcher.FetchBackward, deadline, onEvent)
+
+		if ctx.Err() != nil {
+			log.Printf("[sync-async] Sync cancelled for address %s", address)
+		} else {
+			logFetchResults("address interactions (async)", results)
+			log.Printf("[sync-async] Fetch completed for address %s (total: %d events)", address, atomic.LoadInt64(&progress.EventCount))
+		}
+	}()
+
+	return progress
 }
 
 // SyncEventInteractions fetches interactions for an event
