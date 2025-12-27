@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"cipolin/internal/fetcher"
 	"cipolin/internal/handler"
+	"cipolin/internal/keys"
 	"cipolin/internal/relay"
 
 	"github.com/fiatjaf/eventstore/badger"
@@ -21,19 +23,26 @@ import (
 
 // Config holds application configuration
 type Config struct {
-	PrivateKey    string
+	MasterKey     string
 	Port          string
 	StorageRelays []string
 	DBPath        string
 	FetchTTL      time.Duration
 	FetchTimeout  time.Duration
+	RelayURL      string // Public relay URL for kind 10040 tags
 }
 
 func loadConfig() Config {
 	cfg := Config{
-		PrivateKey: os.Getenv("NIP85_PRIVATE_KEY"),
-		Port:       os.Getenv("PORT"),
-		DBPath:     os.Getenv("DB_PATH"),
+		MasterKey: os.Getenv("NIP85_MASTER_KEY"),
+		Port:      os.Getenv("PORT"),
+		DBPath:    os.Getenv("DB_PATH"),
+		RelayURL:  os.Getenv("RELAY_URL"),
+	}
+
+	// Fallback to old env var name for backwards compatibility
+	if cfg.MasterKey == "" {
+		cfg.MasterKey = os.Getenv("NIP85_PRIVATE_KEY")
 	}
 
 	if cfg.Port == "" {
@@ -41,6 +50,9 @@ func loadConfig() Config {
 	}
 	if cfg.DBPath == "" {
 		cfg.DBPath = "./data/cipolin.db"
+	}
+	if cfg.RelayURL == "" {
+		cfg.RelayURL = "wss://localhost:" + cfg.Port
 	}
 
 	// Parse fetch TTL
@@ -97,18 +109,22 @@ func main() {
 
 	config := loadConfig()
 
-	// Load or generate private key
-	privateKey := config.PrivateKey
-	if privateKey == "" {
-		privateKey = nostr.GeneratePrivateKey()
-		log.Printf("WARNING: No NIP85_PRIVATE_KEY set. Generated temporary key.")
+	// Load or generate master key
+	masterKey := config.MasterKey
+	if masterKey == "" {
+		masterKey = nostr.GeneratePrivateKey()
+		log.Printf("WARNING: No NIP85_MASTER_KEY set. Generated temporary key.")
+		log.Printf("WARNING: Set NIP85_MASTER_KEY in .env for persistent metric keys.")
 	}
 
-	pubKey, err := nostr.GetPublicKey(privateKey)
-	if err != nil {
-		log.Fatalf("Invalid private key: %v", err)
+	// Initialize metric key manager
+	keyManager := keys.NewMetricKeyManager(masterKey)
+
+	// Log all metric pubkeys
+	log.Printf("=== Metric Public Keys ===")
+	for metric, pubkey := range keyManager.GetAllPubKeys() {
+		log.Printf("  %s: %s", metric, pubkey)
 	}
-	log.Printf("Service provider pubkey: %s", pubKey)
 
 	// Initialize database
 	db := &badger.BadgerBackend{
@@ -131,13 +147,13 @@ func main() {
 
 	// Initialize syncer and handler
 	syncer := relay.NewSyncer(eventFetcher, db, config.StorageRelays)
-	h := handler.NewHandler(syncer, db, config.StorageRelays, privateKey, pubKey)
+	h := handler.NewHandler(syncer, db, config.StorageRelays, keyManager)
 
 	// Create relay
 	r := khatru.NewRelay()
 	r.Info.Name = "NIP-85 Trusted Assertions Provider"
-	r.Info.Description = "On-demand computation of user and event metrics"
-	r.Info.PubKey = pubKey
+	r.Info.Description = "On-demand computation of user and event metrics with per-metric signing keys"
+	r.Info.PubKey = keyManager.GetPubKey("rank") // Use rank pubkey as relay identity
 	r.Info.SupportedNIPs = []any{11, 85}
 
 	// Use database for storage
@@ -164,8 +180,51 @@ func main() {
 	// Enable negentropy support
 	r.Negentropy = true
 
+	// Setup HTTP routes
+	mux := r.Router()
+
+	// Endpoint to get metric pubkeys for client kind 10040 configuration
+	mux.HandleFunc("/keys", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		response := map[string]interface{}{
+			"pubkeys":      keyManager.GetAllPubKeys(),
+			"kind10040":    keyManager.GetKind10040Tags(config.RelayURL),
+			"relay_url":    config.RelayURL,
+			"user_metrics": keys.UserMetrics,
+			"event_metrics": keys.EventMetrics,
+		}
+		json.NewEncoder(w).Encode(response)
+	})
+
+	// Root endpoint with info
+	mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+		// Let Khatru handle WebSocket upgrades
+		if req.Header.Get("Upgrade") == "websocket" {
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		response := map[string]interface{}{
+			"name":        "NIP-85 Trusted Assertions Provider",
+			"description": "On-demand computation of user and event metrics",
+			"nip85":       true,
+			"endpoints": map[string]string{
+				"/":     "Relay info / WebSocket",
+				"/keys": "Metric pubkeys for kind 10040 configuration",
+			},
+			"supported_kinds": []int{30382, 30383, 30384},
+		}
+		json.NewEncoder(w).Encode(response)
+	})
+
 	log.Printf("Starting NIP-85 relay on :%s", config.Port)
+	log.Printf("Public relay URL: %s", config.RelayURL)
 	log.Printf("Storage relays: %v", config.StorageRelays)
+	log.Printf("Endpoints: / (relay), /keys (metric pubkeys)")
 
 	if err := http.ListenAndServe(":"+config.Port, r); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
