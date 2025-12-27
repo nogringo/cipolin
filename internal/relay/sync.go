@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"cipolin/internal/fetcher"
+	"cipolin/internal/keys"
 
 	"github.com/nbd-wtf/go-nostr"
 )
@@ -100,7 +101,8 @@ func (s *Syncer) SyncUserEvents(ctx context.Context, pubkey string, userRelays [
 
 // SyncUserEventsAsync starts fetching events asynchronously and returns a progress tracker
 // Sync stops when context is cancelled (e.g., client disconnects)
-func (s *Syncer) SyncUserEventsAsync(ctx context.Context, pubkey string, userRelays []string) *SyncProgress {
+// filterType specifies which types of data to fetch (use keys.FilterAll for everything)
+func (s *Syncer) SyncUserEventsAsync(ctx context.Context, pubkey string, userRelays []string, filterType keys.FilterType) *SyncProgress {
 	progress := &SyncProgress{
 		Done: make(chan struct{}),
 	}
@@ -114,25 +116,34 @@ func (s *Syncer) SyncUserEventsAsync(ctx context.Context, pubkey string, userRel
 			return
 		}
 
-		log.Printf("[sync-async] Fetching events for %s...", pubkey[:16]+"...")
+		log.Printf("[sync-async] Fetching events for %s (filters: %d)...", pubkey[:16]+"...", filterType)
 
-		// Filters for user's own relays
-		userFilters := []nostr.Filter{
-			{Authors: []string{pubkey}, Kinds: []int{1}},                    // Posts/replies
-			{Authors: []string{pubkey}, Kinds: []int{7}},                    // Reactions
-			{Kinds: []int{3}, Tags: nostr.TagMap{"p": []string{pubkey}}},    // Followers
-			{Kinds: []int{9735}, Tags: nostr.TagMap{"p": []string{pubkey}}}, // Zaps received
-			{Kinds: []int{9735}, Tags: nostr.TagMap{"P": []string{pubkey}}}, // Zaps sent (P = sender)
-			{Kinds: []int{9321}, Tags: nostr.TagMap{"p": []string{pubkey}}}, // Nutzaps received
-			{Authors: []string{pubkey}, Kinds: []int{9321}},                 // Nutzaps sent
+		// Build filters based on what's needed
+		var userFilters []nostr.Filter
+		var reportFilters []nostr.Filter
+
+		if filterType&keys.FilterPosts != 0 {
+			userFilters = append(userFilters, nostr.Filter{Authors: []string{pubkey}, Kinds: []int{1}})
 		}
-
-		// Reports should be fetched from popular relays + user relays
-		popularRelays, _ := GetPopularRelays(ctx, s.storageRelays)
-		reportRelays := MergeRelays(popularRelays, userRelays)
-		reportFilters := []nostr.Filter{
-			{Authors: []string{pubkey}, Kinds: []int{1984}},                 // Reports sent
-			{Kinds: []int{1984}, Tags: nostr.TagMap{"p": []string{pubkey}}}, // Reports received
+		if filterType&keys.FilterReactions != 0 {
+			userFilters = append(userFilters, nostr.Filter{Authors: []string{pubkey}, Kinds: []int{7}})
+		}
+		if filterType&keys.FilterFollowers != 0 {
+			userFilters = append(userFilters, nostr.Filter{Kinds: []int{3}, Tags: nostr.TagMap{"p": []string{pubkey}}})
+		}
+		if filterType&keys.FilterZapsRecd != 0 {
+			userFilters = append(userFilters, nostr.Filter{Kinds: []int{9735}, Tags: nostr.TagMap{"p": []string{pubkey}}})
+			userFilters = append(userFilters, nostr.Filter{Kinds: []int{9321}, Tags: nostr.TagMap{"p": []string{pubkey}}})
+		}
+		if filterType&keys.FilterZapsSent != 0 {
+			userFilters = append(userFilters, nostr.Filter{Kinds: []int{9735}, Tags: nostr.TagMap{"P": []string{pubkey}}})
+			userFilters = append(userFilters, nostr.Filter{Authors: []string{pubkey}, Kinds: []int{9321}})
+		}
+		if filterType&keys.FilterReportsRecd != 0 {
+			reportFilters = append(reportFilters, nostr.Filter{Kinds: []int{1984}, Tags: nostr.TagMap{"p": []string{pubkey}}})
+		}
+		if filterType&keys.FilterReportsSent != 0 {
+			reportFilters = append(reportFilters, nostr.Filter{Authors: []string{pubkey}, Kinds: []int{1984}})
 		}
 
 		deadline := time.Now().Add(30 * time.Second)
@@ -140,7 +151,6 @@ func (s *Syncer) SyncUserEventsAsync(ctx context.Context, pubkey string, userRel
 		// Event handler to store events and track count
 		var storeMu sync.Mutex
 		onEvent := func(event *nostr.Event) {
-			// Check context before storing
 			if ctx.Err() != nil {
 				return
 			}
@@ -152,25 +162,44 @@ func (s *Syncer) SyncUserEventsAsync(ctx context.Context, pubkey string, userRel
 			atomic.AddInt64(&progress.EventCount, 1)
 		}
 
-		// Fetch in parallel
+		// Count how many fetch goroutines we need
+		fetchCount := 0
+		if len(userFilters) > 0 {
+			fetchCount++
+		}
+		if len(reportFilters) > 0 {
+			fetchCount++
+		}
+
+		if fetchCount == 0 {
+			log.Printf("[sync-async] No filters to fetch for %s", pubkey[:16]+"...")
+			return
+		}
+
 		var wg sync.WaitGroup
-		wg.Add(2)
+		wg.Add(fetchCount)
 
-		go func() {
-			defer wg.Done()
-			results := s.fetcher.FetchAllContinuously(ctx, userRelays, userFilters, fetcher.FetchBackward, deadline, onEvent)
-			if ctx.Err() == nil {
-				logFetchResults("user relays (async)", results)
-			}
-		}()
+		if len(userFilters) > 0 {
+			go func() {
+				defer wg.Done()
+				results := s.fetcher.FetchAllContinuously(ctx, userRelays, userFilters, fetcher.FetchBackward, deadline, onEvent)
+				if ctx.Err() == nil {
+					logFetchResults("user relays (async)", results)
+				}
+			}()
+		}
 
-		go func() {
-			defer wg.Done()
-			results := s.fetcher.FetchAllContinuously(ctx, reportRelays, reportFilters, fetcher.FetchBackward, deadline, onEvent)
-			if ctx.Err() == nil {
-				logFetchResults("reports (async)", results)
-			}
-		}()
+		if len(reportFilters) > 0 {
+			go func() {
+				defer wg.Done()
+				popularRelays, _ := GetPopularRelays(ctx, s.storageRelays)
+				reportRelays := MergeRelays(popularRelays, userRelays)
+				results := s.fetcher.FetchAllContinuously(ctx, reportRelays, reportFilters, fetcher.FetchBackward, deadline, onEvent)
+				if ctx.Err() == nil {
+					logFetchResults("reports (async)", results)
+				}
+			}()
+		}
 
 		wg.Wait()
 

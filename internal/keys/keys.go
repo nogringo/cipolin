@@ -37,6 +37,74 @@ var AllMetrics = []string{
 	"zap_cnt", "zap_amount",
 }
 
+// FilterType represents different types of data to fetch
+type FilterType int
+
+const (
+	FilterPosts      FilterType = 1 << iota // kind 1 authored
+	FilterReactions                         // kind 7 authored
+	FilterFollowers                         // kind 3 tagging user
+	FilterZapsRecd                          // kind 9735, 9321 tagging user (received)
+	FilterZapsSent                          // kind 9735, 9321 authored (sent)
+	FilterReportsRecd                       // kind 1984 tagging user
+	FilterReportsSent                       // kind 1984 authored
+	FilterAll        = FilterPosts | FilterReactions | FilterFollowers | FilterZapsRecd | FilterZapsSent | FilterReportsRecd | FilterReportsSent
+)
+
+// MetricFilters maps each metric to the filter types it needs
+var MetricFilters = map[string]FilterType{
+	// Posts are needed for post_cnt, reply_cnt, first_created_at, active hours, topics, and rank
+	"post_cnt":           FilterPosts,
+	"reply_cnt":          FilterPosts,
+	"first_created_at":   FilterPosts,
+	"active_hours_start": FilterPosts,
+	"active_hours_end":   FilterPosts,
+	"t":                  FilterPosts,
+
+	// Reactions
+	"reactions_cnt": FilterReactions,
+
+	// Followers
+	"followers": FilterFollowers,
+
+	// Zaps received
+	"zap_amt_recd":         FilterZapsRecd,
+	"zap_cnt_recd":         FilterZapsRecd,
+	"zap_avg_amt_day_recd": FilterZapsRecd | FilterPosts, // needs first post date
+
+	// Zaps sent
+	"zap_amt_sent":         FilterZapsSent,
+	"zap_cnt_sent":         FilterZapsSent,
+	"zap_avg_amt_day_sent": FilterZapsSent | FilterPosts, // needs first post date
+
+	// Reports
+	"reports_cnt_recd": FilterReportsRecd,
+	"reports_cnt_sent": FilterReportsSent,
+
+	// Rank needs everything for proper calculation
+	"rank": FilterAll,
+}
+
+// GetRequiredFilters returns the combined filter types needed for a set of metrics
+func GetRequiredFilters(metrics []string) FilterType {
+	if len(metrics) == 0 {
+		return FilterAll
+	}
+
+	var required FilterType
+	for _, m := range metrics {
+		if f, ok := MetricFilters[m]; ok {
+			required |= f
+		}
+	}
+
+	// If no specific filters found, fetch all
+	if required == 0 {
+		return FilterAll
+	}
+	return required
+}
+
 // UserMetrics are the metrics for kind 30382
 var UserMetrics = []string{
 	"followers", "rank", "first_created_at",

@@ -159,13 +159,32 @@ func (h *Handler) shouldGenerateMetric(metric string, requestedAuthors map[strin
 	return requestedAuthors[metricPubkey]
 }
 
+// getRequestedMetrics returns the list of metric names being requested based on author filter
+func (h *Handler) getRequestedMetrics(requestedAuthors map[string]bool) []string {
+	if len(requestedAuthors) == 0 {
+		return nil // nil means all metrics
+	}
+
+	var metrics []string
+	for _, metric := range keys.UserMetrics {
+		if h.shouldGenerateMetric(metric, requestedAuthors) {
+			metrics = append(metrics, metric)
+		}
+	}
+	return metrics
+}
+
 // streamUserAssertions streams user assertions with lazy loading
 func (h *Handler) streamUserAssertions(ctx context.Context, pubkey string, requestedAuthors map[string]bool, ch chan *nostr.Event) {
 	if len(pubkey) != 64 {
 		return
 	}
 
-	log.Printf("[handler] Starting lazy load for user %s", pubkey[:16]+"...")
+	// Determine which metrics are requested and what filters we need
+	requestedMetrics := h.getRequestedMetrics(requestedAuthors)
+	filterType := keys.GetRequiredFilters(requestedMetrics)
+
+	log.Printf("[handler] Starting lazy load for user %s (metrics: %v, filterType: %d)", pubkey[:16]+"...", requestedMetrics, filterType)
 
 	// Get user's NIP-65 relays
 	userRelays, err := relay.GetUserNIP65Relays(ctx, h.storageRelays, pubkey)
@@ -176,8 +195,8 @@ func (h *Handler) streamUserAssertions(ctx context.Context, pubkey string, reque
 	// Send initial metrics from local DB (will be 0 if no cached data)
 	h.sendUserMetrics(ctx, pubkey, requestedAuthors, ch, false)
 
-	// Start async sync (will stop when ctx is cancelled)
-	progress := h.syncer.SyncUserEventsAsync(ctx, pubkey, userRelays)
+	// Start async sync with only the required filters
+	progress := h.syncer.SyncUserEventsAsync(ctx, pubkey, userRelays, filterType)
 
 	// Track last event count to detect changes
 	var lastEventCount int64 = 0
