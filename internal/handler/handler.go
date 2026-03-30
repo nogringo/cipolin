@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"log"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -30,15 +31,17 @@ type Handler struct {
 	db            metrics.EventStore
 	storageRelays []string
 	keyManager    *keys.MetricKeyManager
+	rankEngine    *metrics.GrapeRankEngine
 }
 
 // NewHandler creates a new NIP-85 handler
-func NewHandler(syncer *relay.Syncer, db metrics.EventStore, storageRelays []string, keyManager *keys.MetricKeyManager) *Handler {
+func NewHandler(syncer *relay.Syncer, db metrics.EventStore, storageRelays []string, keyManager *keys.MetricKeyManager, rankEngine *metrics.GrapeRankEngine) *Handler {
 	return &Handler{
 		syncer:        syncer,
 		db:            db,
 		storageRelays: storageRelays,
 		keyManager:    keyManager,
+		rankEngine:    rankEngine,
 	}
 }
 
@@ -60,6 +63,8 @@ func (h *Handler) HandleNIP85Query(ctx context.Context, filter nostr.Filter) (ch
 			return
 		}
 
+		requesterPubkey := extractRequesterPubkey(filter)
+
 		// Build set of requested author pubkeys (metric filters)
 		requestedAuthors := make(map[string]bool)
 		for _, author := range filter.Authors {
@@ -71,7 +76,7 @@ func (h *Handler) HandleNIP85Query(ctx context.Context, filter nostr.Filter) (ch
 				switch kind {
 				case KindUserAssertion:
 					// Use streaming/lazy loading for user assertions
-					h.streamUserAssertions(ctx, subject, requestedAuthors, ch)
+					h.streamUserAssertions(ctx, subject, requesterPubkey, requestedAuthors, ch)
 				case KindEventAssertion:
 					h.streamEventAssertions(ctx, subject, requestedAuthors, ch)
 				case KindAddressAssertion:
@@ -82,6 +87,17 @@ func (h *Handler) HandleNIP85Query(ctx context.Context, filter nostr.Filter) (ch
 	}()
 
 	return ch, nil
+}
+
+func extractRequesterPubkey(filter nostr.Filter) string {
+	rTags := filter.Tags["r"]
+	if len(rTags) == 0 {
+		return ""
+	}
+	if len(rTags[0]) != 64 {
+		return ""
+	}
+	return rTags[0]
 }
 
 func truncateSubject(s string) string {
@@ -175,7 +191,7 @@ func (h *Handler) getRequestedMetrics(requestedAuthors map[string]bool) []string
 }
 
 // streamUserAssertions streams user assertions with lazy loading
-func (h *Handler) streamUserAssertions(ctx context.Context, pubkey string, requestedAuthors map[string]bool, ch chan *nostr.Event) {
+func (h *Handler) streamUserAssertions(ctx context.Context, pubkey, requesterPubkey string, requestedAuthors map[string]bool, ch chan *nostr.Event) {
 	if len(pubkey) != 64 {
 		return
 	}
@@ -193,7 +209,7 @@ func (h *Handler) streamUserAssertions(ctx context.Context, pubkey string, reque
 	}
 
 	// Send initial metrics from local DB (will be 0 if no cached data)
-	h.sendUserMetrics(ctx, pubkey, requestedAuthors, ch, false)
+	h.sendUserMetrics(ctx, pubkey, requesterPubkey, requestedAuthors, ch, false)
 
 	// Start async sync with only the required filters
 	progress := h.syncer.SyncUserEventsAsync(ctx, pubkey, userRelays, filterType)
@@ -212,7 +228,7 @@ func (h *Handler) streamUserAssertions(ctx context.Context, pubkey string, reque
 		case <-progress.Done:
 			// Final update
 			log.Printf("[handler] Sync complete for %s, sending final metrics", pubkey[:16]+"...")
-			h.sendUserMetrics(ctx, pubkey, requestedAuthors, ch, true)
+			h.sendUserMetrics(ctx, pubkey, requesterPubkey, requestedAuthors, ch, true)
 			return
 
 		case <-ticker.C:
@@ -221,7 +237,7 @@ func (h *Handler) streamUserAssertions(ctx context.Context, pubkey string, reque
 			if currentCount > lastEventCount {
 				log.Printf("[handler] Progress update for %s: %d events (was %d)", pubkey[:16]+"...", currentCount, lastEventCount)
 				lastEventCount = currentCount
-				h.sendUserMetrics(ctx, pubkey, requestedAuthors, ch, false)
+				h.sendUserMetrics(ctx, pubkey, requesterPubkey, requestedAuthors, ch, false)
 			}
 		}
 	}
@@ -229,11 +245,16 @@ func (h *Handler) streamUserAssertions(ctx context.Context, pubkey string, reque
 
 // sendUserMetrics computes and sends user metric events
 // isFinal indicates this is the last update (publish to storage relays)
-func (h *Handler) sendUserMetrics(ctx context.Context, pubkey string, requestedAuthors map[string]bool, ch chan *nostr.Event, isFinal bool) {
+func (h *Handler) sendUserMetrics(ctx context.Context, pubkey, requesterPubkey string, requestedAuthors map[string]bool, ch chan *nostr.Event, isFinal bool) {
 	pTag := nostr.Tag{"p", pubkey}
 
 	// Always compute from local DB (returns 0s if no data)
 	m := metrics.ComputeUserMetrics(ctx, h.db, pubkey)
+	if h.rankEngine != nil {
+		if rank, ok := h.rankEngine.GetRank(ctx, requesterPubkey, pubkey); ok {
+			m["rank"] = strconv.Itoa(rank)
+		}
+	}
 
 	metricNames := []string{
 		"followers", "rank", "first_created_at",
@@ -298,7 +319,7 @@ func (h *Handler) sendUserMetrics(ctx context.Context, pubkey string, requestedA
 }
 
 // generateUserAssertions creates kind 30382 assertions for a pubkey (one per metric) - blocking version
-func (h *Handler) generateUserAssertions(ctx context.Context, pubkey string, requestedAuthors map[string]bool) ([]*nostr.Event, error) {
+func (h *Handler) generateUserAssertions(ctx context.Context, pubkey, requesterPubkey string, requestedAuthors map[string]bool) ([]*nostr.Event, error) {
 	if len(pubkey) != 64 {
 		return nil, nil
 	}
@@ -320,6 +341,11 @@ func (h *Handler) generateUserAssertions(ctx context.Context, pubkey string, req
 
 	// Compute metrics from local DB
 	m := metrics.ComputeUserMetrics(ctx, h.db, pubkey)
+	if h.rankEngine != nil {
+		if rank, ok := h.rankEngine.GetRank(ctx, requesterPubkey, pubkey); ok {
+			m["rank"] = strconv.Itoa(rank)
+		}
+	}
 
 	log.Printf("[handler] Metrics computed for %s, building events...", pubkey[:16]+"...")
 

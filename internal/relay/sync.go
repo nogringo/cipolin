@@ -128,6 +128,9 @@ func (s *Syncer) SyncUserEventsAsync(ctx context.Context, pubkey string, userRel
 		if filterType&keys.FilterReactions != 0 {
 			userFilters = append(userFilters, nostr.Filter{Authors: []string{pubkey}, Kinds: []int{7}})
 		}
+		if filterType&keys.FilterReposts != 0 {
+			userFilters = append(userFilters, nostr.Filter{Authors: []string{pubkey}, Kinds: []int{6}})
+		}
 		if filterType&keys.FilterFollowers != 0 {
 			userFilters = append(userFilters, nostr.Filter{Kinds: []int{3}, Tags: nostr.TagMap{"p": []string{pubkey}}})
 		}

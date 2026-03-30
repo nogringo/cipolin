@@ -275,8 +275,8 @@ func ComputeUserMetrics(ctx context.Context, db EventStore, pubkey string) map[s
 	// Find active hours range
 	activeStart, activeEnd := findActiveHoursRange(hourCounts)
 
-	// Calculate rank
-	rank := CalculateUserRank(followerCount, postCount, zapAmountRecd, zapCountRecd)
+	// Rank is populated by personalized GrapeRank in handler; default to 0 here.
+	rank := 0
 
 	// Build metrics map
 	metrics["followers"] = strconv.Itoa(followerCount)

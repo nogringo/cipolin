@@ -41,14 +41,15 @@ var AllMetrics = []string{
 type FilterType int
 
 const (
-	FilterPosts      FilterType = 1 << iota // kind 1 authored
-	FilterReactions                         // kind 7 authored
-	FilterFollowers                         // kind 3 tagging user
-	FilterZapsRecd                          // kind 9735, 9321 tagging user (received)
-	FilterZapsSent                          // kind 9735, 9321 authored (sent)
-	FilterReportsRecd                       // kind 1984 tagging user
-	FilterReportsSent                       // kind 1984 authored
-	FilterAll        = FilterPosts | FilterReactions | FilterFollowers | FilterZapsRecd | FilterZapsSent | FilterReportsRecd | FilterReportsSent
+	FilterPosts       FilterType = 1 << iota // kind 1 authored
+	FilterReactions                          // kind 7 authored
+	FilterReposts                            // kind 6 authored
+	FilterFollowers                          // kind 3 tagging user
+	FilterZapsRecd                           // kind 9735, 9321 tagging user (received)
+	FilterZapsSent                           // kind 9735, 9321 authored (sent)
+	FilterReportsRecd                        // kind 1984 tagging user
+	FilterReportsSent                        // kind 1984 authored
+	FilterAll         = FilterPosts | FilterReactions | FilterReposts | FilterFollowers | FilterZapsRecd | FilterZapsSent | FilterReportsRecd | FilterReportsSent
 )
 
 // MetricFilters maps each metric to the filter types it needs

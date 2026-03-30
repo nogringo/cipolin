@@ -13,6 +13,7 @@ import (
 	"cipolin/internal/fetcher"
 	"cipolin/internal/handler"
 	"cipolin/internal/keys"
+	"cipolin/internal/metrics"
 	"cipolin/internal/relay"
 
 	"github.com/fiatjaf/eventstore/badger"
@@ -30,6 +31,7 @@ type Config struct {
 	FetchTTL      time.Duration
 	FetchTimeout  time.Duration
 	RelayURL      string // Public relay URL for kind 10040 tags
+	RankCacheTTL  time.Duration
 }
 
 func loadConfig() Config {
@@ -73,6 +75,15 @@ func loadConfig() Config {
 	}
 	if cfg.FetchTimeout == 0 {
 		cfg.FetchTimeout = fetcher.DefaultFetchTimeout
+	}
+
+	if ttlStr := os.Getenv("RANK_CACHE_TTL_SECONDS"); ttlStr != "" {
+		if ttl, err := strconv.Atoi(ttlStr); err == nil {
+			cfg.RankCacheTTL = time.Duration(ttl) * time.Second
+		}
+	}
+	if cfg.RankCacheTTL == 0 {
+		cfg.RankCacheTTL = 5 * time.Minute
 	}
 
 	// Parse storage relays
@@ -147,7 +158,8 @@ func main() {
 
 	// Initialize syncer and handler
 	syncer := relay.NewSyncer(eventFetcher, db, config.StorageRelays)
-	h := handler.NewHandler(syncer, db, config.StorageRelays, keyManager)
+	rankEngine := metrics.NewGrapeRankEngine(db, config.RankCacheTTL)
+	h := handler.NewHandler(syncer, db, config.StorageRelays, keyManager, rankEngine)
 
 	// Create relay
 	r := khatru.NewRelay()
@@ -189,10 +201,10 @@ func main() {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 
 		response := map[string]interface{}{
-			"pubkeys":      keyManager.GetAllPubKeys(),
-			"kind10040":    keyManager.GetKind10040Tags(config.RelayURL),
-			"relay_url":    config.RelayURL,
-			"user_metrics": keys.UserMetrics,
+			"pubkeys":       keyManager.GetAllPubKeys(),
+			"kind10040":     keyManager.GetKind10040Tags(config.RelayURL),
+			"relay_url":     config.RelayURL,
+			"user_metrics":  keys.UserMetrics,
 			"event_metrics": keys.EventMetrics,
 		}
 		json.NewEncoder(w).Encode(response)

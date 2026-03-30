@@ -80,6 +80,30 @@ FETCH_TTL_SECONDS=60
 
 # Fetch timeout - timeout per relay connection (seconds)
 FETCH_TIMEOUT_SECONDS=10
+
+# Personalized rank cache TTL (seconds)
+# Used for both graph cache and requester-specific rank cache
+RANK_CACHE_TTL_SECONDS=300
+```
+
+## Personalized rank (`rank` on kind 30382)
+
+User `rank` is personalized per requester.
+
+- Include `r` tag with the requester pubkey in your REQ filter.
+- `d` remains the target pubkey being scored.
+- Positive graph signals: follows, replies, reposts, reactions, zaps.
+- Negative signals: kind `1984` reports.
+- Cache behavior: shared graph cache + requester-specific score cache, both TTL-controlled by `RANK_CACHE_TTL_SECONDS` (default 5 minutes).
+
+Example REQ filter payload:
+
+```json
+{
+	"kinds": [30382],
+	"#d": ["<target_pubkey>"],
+	"#r": ["<requester_pubkey>"]
+}
 ```
 
 ## Usage
@@ -94,6 +118,38 @@ Query user metrics:
 
 ```bash
 nak req -k 30382 -d <pubkey> ws://localhost:3334
+```
+
+Query personalized user rank (requester-aware):
+
+```bash
+nak req -k 30382 -d <target_pubkey> -t r=<requester_pubkey> ws://localhost:3334
+```
+
+If your `nak` build does not support `-t`, send the equivalent raw Nostr `REQ`:
+
+```json
+["REQ","rank-sub",{"kinds":[30382],"#d":["<target_pubkey>"],"#r":["<requester_pubkey>"]}]
+```
+
+To return only rank assertions (no other user metrics), filter by the `rank` metric pubkey in `authors`:
+
+1. Get metric pubkeys:
+
+```bash
+curl -s http://localhost:3334/keys
+```
+
+2. Use `pubkeys.rank` as the only author in your REQ:
+
+```bash
+nak req -k 30382 -a <rank_metric_pubkey> -d <target_pubkey> -t r=<requester_pubkey> ws://localhost:3334
+```
+
+Equivalent raw `REQ`:
+
+```json
+["REQ","rank-only",{"kinds":[30382],"authors":["<rank_metric_pubkey>"],"#d":["<target_pubkey>"],"#r":["<requester_pubkey>"]}]
 ```
 
 Query event metrics:
@@ -113,7 +169,7 @@ nak req -k 30384 -d <kind:pubkey:d-tag> ws://localhost:3334
 | Tag | Description |
 |-----|-------------|
 | `followers` | Number of followers |
-| `rank` | Normalized rank (0-100) |
+| `rank` | Personalized requester-seeded rank (0-100), keyed by `r` tag |
 | `first_created_at` | Timestamp of first known event |
 | `post_cnt` | Number of posts |
 | `reply_cnt` | Number of replies |
