@@ -7,7 +7,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/nbd-wtf/go-nostr"
+	"fiatjaf.com/nostr"
 )
 
 // FetchDirection indicates backward (older) or forward (newer) fetching
@@ -30,7 +30,7 @@ const (
 
 // FetchResult holds the result of a fetch operation
 type FetchResult struct {
-	Events    []*nostr.Event
+	Events    []nostr.Event
 	Cursor    *FetchCursor
 	Status    FetchStatus
 	Direction FetchDirection
@@ -99,19 +99,25 @@ func filterToCanonicalMap(f nostr.Filter) map[string]any {
 
 	if len(f.IDs) > 0 {
 		ids := make([]string, len(f.IDs))
-		copy(ids, f.IDs)
+		for i, id := range f.IDs {
+			ids[i] = id.Hex()
+		}
 		sort.Strings(ids)
 		m["ids"] = ids
 	}
 	if len(f.Authors) > 0 {
 		authors := make([]string, len(f.Authors))
-		copy(authors, f.Authors)
+		for i, pk := range f.Authors {
+			authors[i] = pk.Hex()
+		}
 		sort.Strings(authors)
 		m["authors"] = authors
 	}
 	if len(f.Kinds) > 0 {
 		kinds := make([]int, len(f.Kinds))
-		copy(kinds, f.Kinds)
+		for i, k := range f.Kinds {
+			kinds[i] = int(k)
+		}
 		sort.Ints(kinds)
 		m["kinds"] = kinds
 	}

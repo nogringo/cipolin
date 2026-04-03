@@ -2,18 +2,17 @@ package keys
 
 import (
 	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"log"
 
-	"github.com/nbd-wtf/go-nostr"
+	"fiatjaf.com/nostr"
 )
 
 // MetricKey holds the keypair for a specific metric
 type MetricKey struct {
-	Metric     string `json:"metric"`
-	PrivateKey string `json:"-"`
-	PublicKey  string `json:"pubkey"`
+	Metric     string        `json:"metric"`
+	PrivateKey [32]byte
+	PublicKey  nostr.PubKey
 }
 
 // MetricKeyManager manages deterministic keys for each metric
@@ -132,23 +131,19 @@ func NewMetricKeyManager(masterKey string) *MetricKeyManager {
 	return km
 }
 
-// deriveKey deterministically derives a private key from master + metric name
-func (km *MetricKeyManager) deriveKey(metric string) string {
+// deriveKey deterministically derives a 32-byte private key from master + metric name
+func (km *MetricKeyManager) deriveKey(metric string) [32]byte {
 	// Use SHA256(masterKey + ":nip85:" + metric) as the private key
 	seed := km.masterKey + ":nip85:" + metric
 	hash := sha256.Sum256([]byte(seed))
-	return hex.EncodeToString(hash[:])
+	return hash
 }
 
 // deriveAllKeys generates keys for all supported metrics
 func (km *MetricKeyManager) deriveAllKeys() {
 	for _, metric := range AllMetrics {
 		privKey := km.deriveKey(metric)
-		pubKey, err := nostr.GetPublicKey(privKey)
-		if err != nil {
-			log.Printf("[keys] Failed to derive pubkey for metric %s: %v", metric, err)
-			continue
-		}
+		pubKey := nostr.GetPublicKey(privKey)
 
 		km.metricKeys[metric] = &MetricKey{
 			Metric:     metric,
@@ -168,10 +163,10 @@ func (km *MetricKeyManager) GetKey(metric string) (*MetricKey, error) {
 	return key, nil
 }
 
-// GetPubKey returns only the public key for a metric
+// GetPubKey returns the hex-encoded public key for a metric
 func (km *MetricKeyManager) GetPubKey(metric string) string {
 	if key, ok := km.metricKeys[metric]; ok {
-		return key.PublicKey
+		return key.PublicKey.Hex()
 	}
 	return ""
 }
@@ -186,11 +181,11 @@ func (km *MetricKeyManager) SignEventForMetric(event *nostr.Event, metric string
 	return event.Sign(key.PrivateKey)
 }
 
-// GetAllPubKeys returns a map of metric -> pubkey for client configuration
+// GetAllPubKeys returns a map of metric -> pubkey (hex-encoded) for client configuration
 func (km *MetricKeyManager) GetAllPubKeys() map[string]string {
 	result := make(map[string]string)
 	for metric, key := range km.metricKeys {
-		result[metric] = key.PublicKey
+		result[metric] = key.PublicKey.Hex()
 	}
 	return result
 }

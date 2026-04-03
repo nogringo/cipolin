@@ -1,20 +1,20 @@
 package metrics
 
 import (
-	"context"
 	"encoding/json"
+	"iter"
 	"math"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/nbd-wtf/go-nostr"
+	"fiatjaf.com/nostr"
 )
 
 // EventStore interface for querying events
 type EventStore interface {
-	QueryEvents(ctx context.Context, filter nostr.Filter) (chan *nostr.Event, error)
+	QueryEvents(filter nostr.Filter, maxLimit int) iter.Seq[nostr.Event]
 }
 
 // extractAmountFromZapRequest parses the embedded kind 9734 JSON and extracts the amount
@@ -36,7 +36,7 @@ func extractAmountFromZapRequest(descriptionJSON string) int64 {
 }
 
 // extractAmountFromNutzap extracts amount from Cashu proof tags in a nutzap event
-func extractAmountFromNutzap(event *nostr.Event) int64 {
+func extractAmountFromNutzap(event nostr.Event) int64 {
 	var totalAmount int64
 	for _, tag := range event.Tags {
 		if len(tag) >= 2 && tag[0] == "proof" {
@@ -63,7 +63,7 @@ func extractAmountFromNutzap(event *nostr.Event) int64 {
 }
 
 // ComputeUserMetrics computes kind 30382 metrics for a pubkey from local DB
-func ComputeUserMetrics(ctx context.Context, db EventStore, pubkey string) map[string]string {
+func ComputeUserMetrics(db EventStore, pubkey string) map[string]string {
 	metrics := make(map[string]string)
 
 	var (
@@ -88,21 +88,19 @@ func ComputeUserMetrics(ctx context.Context, db EventStore, pubkey string) map[s
 
 	// Count followers (kind 3 contact lists with p tag)
 	followerFilter := nostr.Filter{
-		Kinds: []int{3},
+		Kinds: []nostr.Kind{nostr.Kind(3)},
 		Tags:  nostr.TagMap{"p": []string{pubkey}},
 	}
-	followerCh, _ := db.QueryEvents(ctx, followerFilter)
-	for range followerCh {
+	for range db.QueryEvents(followerFilter, 0) {
 		followerCount++
 	}
 
 	// Count posts and replies (kind 1 by author)
 	postFilter := nostr.Filter{
-		Authors: []string{pubkey},
-		Kinds:   []int{1},
+		Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)},
+		Kinds:   []nostr.Kind{nostr.Kind(1)},
 	}
-	postCh, _ := db.QueryEvents(ctx, postFilter)
-	for event := range postCh {
+	for event := range db.QueryEvents(postFilter, 0) {
 		ts := event.CreatedAt.Time().Unix()
 		if ts < firstCreatedAt {
 			firstCreatedAt = ts
@@ -137,21 +135,19 @@ func ComputeUserMetrics(ctx context.Context, db EventStore, pubkey string) map[s
 
 	// Count reactions sent (kind 7 by author)
 	reactionFilter := nostr.Filter{
-		Authors: []string{pubkey},
-		Kinds:   []int{7},
+		Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)},
+		Kinds:   []nostr.Kind{nostr.Kind(7)},
 	}
-	reactionCh, _ := db.QueryEvents(ctx, reactionFilter)
-	for range reactionCh {
+	for range db.QueryEvents(reactionFilter, 0) {
 		reactionCount++
 	}
 
 	// Count zaps received (kind 9735 with p tag)
 	zapRecdFilter := nostr.Filter{
-		Kinds: []int{9735},
+		Kinds: []nostr.Kind{nostr.Kind(9735)},
 		Tags:  nostr.TagMap{"p": []string{pubkey}},
 	}
-	zapRecdCh, _ := db.QueryEvents(ctx, zapRecdFilter)
-	for event := range zapRecdCh {
+	for event := range db.QueryEvents(zapRecdFilter, 0) {
 		zapCountRecd++
 		ts := event.CreatedAt.Time().Unix()
 		if ts < oldestZapRecd {
@@ -172,11 +168,10 @@ func ComputeUserMetrics(ctx context.Context, db EventStore, pubkey string) map[s
 
 	// Count nutzaps received (kind 9321 with p tag)
 	nutzapRecdFilter := nostr.Filter{
-		Kinds: []int{9321},
+		Kinds: []nostr.Kind{nostr.Kind(9321)},
 		Tags:  nostr.TagMap{"p": []string{pubkey}},
 	}
-	nutzapRecdCh, _ := db.QueryEvents(ctx, nutzapRecdFilter)
-	for event := range nutzapRecdCh {
+	for event := range db.QueryEvents(nutzapRecdFilter, 0) {
 		zapCountRecd++
 		ts := event.CreatedAt.Time().Unix()
 		if ts < oldestZapRecd {
@@ -189,13 +184,11 @@ func ComputeUserMetrics(ctx context.Context, db EventStore, pubkey string) map[s
 	}
 
 	// Count zaps sent (kind 9735 with P tag = sender pubkey)
-	// Note: kind 9734 is not published to relays, we use 9735 receipts with P tag
 	zapSentFilter := nostr.Filter{
-		Kinds: []int{9735},
+		Kinds: []nostr.Kind{nostr.Kind(9735)},
 		Tags:  nostr.TagMap{"P": []string{pubkey}},
 	}
-	zapSentCh, _ := db.QueryEvents(ctx, zapSentFilter)
-	for event := range zapSentCh {
+	for event := range db.QueryEvents(zapSentFilter, 0) {
 		zapCountSent++
 		ts := event.CreatedAt.Time().Unix()
 		if ts < oldestZapSent {
@@ -204,11 +197,10 @@ func ComputeUserMetrics(ctx context.Context, db EventStore, pubkey string) map[s
 		if ts > newestZapSent {
 			newestZapSent = ts
 		}
-		// Get amount from the description tag (embedded 9734 request)
 		for _, tag := range event.Tags {
 			if len(tag) >= 2 && tag[0] == "description" {
 				amount := extractAmountFromZapRequest(tag[1])
-				zapAmountSent += amount / 1000 // msats to sats
+				zapAmountSent += amount / 1000
 				break
 			}
 		}
@@ -216,11 +208,10 @@ func ComputeUserMetrics(ctx context.Context, db EventStore, pubkey string) map[s
 
 	// Count nutzaps sent (kind 9321 by author)
 	nutzapSentFilter := nostr.Filter{
-		Authors: []string{pubkey},
-		Kinds:   []int{9321},
+		Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)},
+		Kinds:   []nostr.Kind{nostr.Kind(9321)},
 	}
-	nutzapSentCh, _ := db.QueryEvents(ctx, nutzapSentFilter)
-	for event := range nutzapSentCh {
+	for event := range db.QueryEvents(nutzapSentFilter, 0) {
 		zapCountSent++
 		ts := event.CreatedAt.Time().Unix()
 		if ts < oldestZapSent {
@@ -234,21 +225,19 @@ func ComputeUserMetrics(ctx context.Context, db EventStore, pubkey string) map[s
 
 	// Count reports received (kind 1984 with p tag)
 	reportsRecdFilter := nostr.Filter{
-		Kinds: []int{1984},
+		Kinds: []nostr.Kind{nostr.Kind(1984)},
 		Tags:  nostr.TagMap{"p": []string{pubkey}},
 	}
-	reportsRecdCh, _ := db.QueryEvents(ctx, reportsRecdFilter)
-	for range reportsRecdCh {
+	for range db.QueryEvents(reportsRecdFilter, 0) {
 		reportsRecdCount++
 	}
 
 	// Count reports sent (kind 1984 by author)
 	reportsSentFilter := nostr.Filter{
-		Authors: []string{pubkey},
-		Kinds:   []int{1984},
+		Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)},
+		Kinds:   []nostr.Kind{nostr.Kind(1984)},
 	}
-	reportsSentCh, _ := db.QueryEvents(ctx, reportsSentFilter)
-	for range reportsSentCh {
+	for range db.QueryEvents(reportsSentFilter, 0) {
 		reportsSentCount++
 	}
 
@@ -377,7 +366,7 @@ func findActiveHoursRange(hourCounts []int) (start, end int) {
 }
 
 // ComputeEventMetrics computes kind 30383 metrics for an event ID from local DB
-func ComputeEventMetrics(ctx context.Context, db EventStore, eventID string) map[string]string {
+func ComputeEventMetrics(db EventStore, eventID string) map[string]string {
 	metrics := make(map[string]string)
 
 	var (
@@ -391,11 +380,10 @@ func ComputeEventMetrics(ctx context.Context, db EventStore, eventID string) map
 
 	// Comments/replies (kind 1 with e tag, excluding quotes)
 	commentFilter := nostr.Filter{
-		Kinds: []int{1},
+		Kinds: []nostr.Kind{nostr.Kind(1)},
 		Tags:  nostr.TagMap{"e": []string{eventID}},
 	}
-	commentCh, _ := db.QueryEvents(ctx, commentFilter)
-	for event := range commentCh {
+	for event := range db.QueryEvents(commentFilter, 0) {
 		// Skip if it's a quote (has q tag for this event)
 		isQuote := false
 		for _, tag := range event.Tags {
@@ -411,41 +399,37 @@ func ComputeEventMetrics(ctx context.Context, db EventStore, eventID string) map
 
 	// Quotes (kind 1 with q tag)
 	quoteFilter := nostr.Filter{
-		Kinds: []int{1},
+		Kinds: []nostr.Kind{nostr.Kind(1)},
 		Tags:  nostr.TagMap{"q": []string{eventID}},
 	}
-	quoteCh, _ := db.QueryEvents(ctx, quoteFilter)
-	for range quoteCh {
+	for range db.QueryEvents(quoteFilter, 0) {
 		quoteCount++
 	}
 
 	// Reposts (kind 6)
 	repostFilter := nostr.Filter{
-		Kinds: []int{6},
+		Kinds: []nostr.Kind{nostr.Kind(6)},
 		Tags:  nostr.TagMap{"e": []string{eventID}},
 	}
-	repostCh, _ := db.QueryEvents(ctx, repostFilter)
-	for range repostCh {
+	for range db.QueryEvents(repostFilter, 0) {
 		repostCount++
 	}
 
 	// Reactions (kind 7)
 	reactionFilter := nostr.Filter{
-		Kinds: []int{7},
+		Kinds: []nostr.Kind{nostr.Kind(7)},
 		Tags:  nostr.TagMap{"e": []string{eventID}},
 	}
-	reactionCh, _ := db.QueryEvents(ctx, reactionFilter)
-	for range reactionCh {
+	for range db.QueryEvents(reactionFilter, 0) {
 		reactionCount++
 	}
 
 	// Zaps (kind 9735)
 	zapFilter := nostr.Filter{
-		Kinds: []int{9735},
+		Kinds: []nostr.Kind{nostr.Kind(9735)},
 		Tags:  nostr.TagMap{"e": []string{eventID}},
 	}
-	zapCh, _ := db.QueryEvents(ctx, zapFilter)
-	for event := range zapCh {
+	for event := range db.QueryEvents(zapFilter, 0) {
 		zapCount++
 		// Get amount from description tag (embedded 9734)
 		for _, tag := range event.Tags {
@@ -459,11 +443,10 @@ func ComputeEventMetrics(ctx context.Context, db EventStore, eventID string) map
 
 	// Nutzaps (kind 9321)
 	nutzapFilter := nostr.Filter{
-		Kinds: []int{9321},
+		Kinds: []nostr.Kind{nostr.Kind(9321)},
 		Tags:  nostr.TagMap{"e": []string{eventID}},
 	}
-	nutzapCh, _ := db.QueryEvents(ctx, nutzapFilter)
-	for event := range nutzapCh {
+	for event := range db.QueryEvents(nutzapFilter, 0) {
 		zapCount++
 		zapAmount += extractAmountFromNutzap(event)
 	}
@@ -483,7 +466,7 @@ func ComputeEventMetrics(ctx context.Context, db EventStore, eventID string) map
 }
 
 // ComputeAddressMetrics computes kind 30384 metrics for an address from local DB
-func ComputeAddressMetrics(ctx context.Context, db EventStore, address string) map[string]string {
+func ComputeAddressMetrics(db EventStore, address string) map[string]string {
 	metrics := make(map[string]string)
 
 	var (
@@ -497,41 +480,37 @@ func ComputeAddressMetrics(ctx context.Context, db EventStore, address string) m
 
 	// Comments (kind 1 with a tag)
 	commentFilter := nostr.Filter{
-		Kinds: []int{1},
+		Kinds: []nostr.Kind{nostr.Kind(1)},
 		Tags:  nostr.TagMap{"a": []string{address}},
 	}
-	commentCh, _ := db.QueryEvents(ctx, commentFilter)
-	for range commentCh {
+	for range db.QueryEvents(commentFilter, 0) {
 		commentCount++
 	}
 
 	// Reposts (kind 6, 16)
 	repostFilter := nostr.Filter{
-		Kinds: []int{6, 16},
+		Kinds: []nostr.Kind{nostr.Kind(6), nostr.Kind(16)},
 		Tags:  nostr.TagMap{"a": []string{address}},
 	}
-	repostCh, _ := db.QueryEvents(ctx, repostFilter)
-	for range repostCh {
+	for range db.QueryEvents(repostFilter, 0) {
 		repostCount++
 	}
 
 	// Reactions (kind 7)
 	reactionFilter := nostr.Filter{
-		Kinds: []int{7},
+		Kinds: []nostr.Kind{nostr.Kind(7)},
 		Tags:  nostr.TagMap{"a": []string{address}},
 	}
-	reactionCh, _ := db.QueryEvents(ctx, reactionFilter)
-	for range reactionCh {
+	for range db.QueryEvents(reactionFilter, 0) {
 		reactionCount++
 	}
 
 	// Zaps (kind 9735)
 	zapFilter := nostr.Filter{
-		Kinds: []int{9735},
+		Kinds: []nostr.Kind{nostr.Kind(9735)},
 		Tags:  nostr.TagMap{"a": []string{address}},
 	}
-	zapCh, _ := db.QueryEvents(ctx, zapFilter)
-	for event := range zapCh {
+	for event := range db.QueryEvents(zapFilter, 0) {
 		zapCount++
 		// Get amount from description tag (embedded 9734)
 		for _, tag := range event.Tags {
@@ -545,11 +524,10 @@ func ComputeAddressMetrics(ctx context.Context, db EventStore, address string) m
 
 	// Nutzaps (kind 9321)
 	nutzapFilter := nostr.Filter{
-		Kinds: []int{9321},
+		Kinds: []nostr.Kind{nostr.Kind(9321)},
 		Tags:  nostr.TagMap{"a": []string{address}},
 	}
-	nutzapCh, _ := db.QueryEvents(ctx, nutzapFilter)
-	for event := range nutzapCh {
+	for event := range db.QueryEvents(nutzapFilter, 0) {
 		zapCount++
 		zapAmount += extractAmountFromNutzap(event)
 	}

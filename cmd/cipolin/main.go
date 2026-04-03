@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"iter"
 	"log"
 	"net/http"
 	"os"
@@ -15,10 +16,11 @@ import (
 	"cipolin/internal/keys"
 	"cipolin/internal/relay"
 
-	"github.com/fiatjaf/eventstore/badger"
-	"github.com/fiatjaf/khatru"
+	"fiatjaf.com/nostr"
+	"fiatjaf.com/nostr/eventstore/boltdb"
+	"fiatjaf.com/nostr/khatru"
+	"fiatjaf.com/nostr/khatru/policies"
 	"github.com/joho/godotenv"
-	"github.com/nbd-wtf/go-nostr"
 )
 
 // Config holds application configuration
@@ -112,7 +114,8 @@ func main() {
 	// Load or generate master key
 	masterKey := config.MasterKey
 	if masterKey == "" {
-		masterKey = nostr.GeneratePrivateKey()
+		sk := nostr.Generate()
+		masterKey = sk.Hex()
 		log.Printf("WARNING: No NIP85_MASTER_KEY set. Generated temporary key.")
 		log.Printf("WARNING: Set NIP85_MASTER_KEY in .env for persistent metric keys.")
 	}
@@ -127,9 +130,8 @@ func main() {
 	}
 
 	// Initialize database
-	db := &badger.BadgerBackend{
-		Path:     config.DBPath,
-		MaxLimit: 10_000_000, // High limit for metrics computation (default is 1000)
+	db := &boltdb.BoltBackend{
+		Path: config.DBPath,
 	}
 	if err := db.Init(); err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
@@ -153,72 +155,89 @@ func main() {
 	r := khatru.NewRelay()
 	r.Info.Name = "NIP-85 Trusted Assertions Provider"
 	r.Info.Description = "On-demand computation of user and event metrics with per-metric signing keys"
-	r.Info.PubKey = keyManager.GetPubKey("rank") // Use rank pubkey as relay identity
+	pubKey := nostr.MustPubKeyFromHex(keyManager.GetPubKey("rank"))
+	r.Info.PubKey = &pubKey // Use rank pubkey as relay identity
 	r.Info.SupportedNIPs = []any{11, 85}
 
-	// Use database for storage
-	r.StoreEvent = append(r.StoreEvent, db.SaveEvent)
-	r.DeleteEvent = append(r.DeleteEvent, db.DeleteEvent)
+	// Use eventstore for storage
+	r.UseEventstore(db, 10_000_000)
 
-	// Wrap DB query to skip NIP-85 kinds (we generate them on-demand)
-	r.QueryEvents = append(r.QueryEvents, func(ctx context.Context, filter nostr.Filter) (chan *nostr.Event, error) {
-		// Skip if only querying NIP-85 kinds
-		if handler.IsOnlyNIP85Kinds(filter.Kinds) {
-			ch := make(chan *nostr.Event)
-			close(ch)
-			return ch, nil
-		}
-		return db.QueryEvents(ctx, filter)
-	})
-
-	// Register NIP-85 query handler (generates fresh assertions)
-	r.QueryEvents = append(
-		[]func(ctx context.Context, filter nostr.Filter) (chan *nostr.Event, error){h.HandleNIP85Query},
-		r.QueryEvents...,
+	// Compose event validation policies using SeqEvent
+	r.OnEvent = policies.SeqEvent(
+		policies.PreventTimestampsInThePast(24*time.Hour),
+		policies.PreventTimestampsInTheFuture(2*time.Hour),
 	)
+
+	// Setup query handlers - order matters!
+	// 1. NIP-85 handler (generates fresh assertions on-demand)
+	// 2. Wrapper that skips NIP-85 kinds for regular DB queries
+	originalQueryStored := r.QueryStored
+	r.QueryStored = func(ctx context.Context, filter nostr.Filter) iter.Seq[nostr.Event] {
+		// Chain: NIP-85 handler first, then skip wrapper, then original
+		return func(yield func(nostr.Event) bool) {
+			// First: NIP-85 handler
+			for evt := range h.HandleNIP85QueryQueryStored(ctx, filter) {
+				if !yield(evt) {
+					return
+				}
+			}
+			// Skip if only querying NIP-85 kinds
+			if handler.IsOnlyNIP85Kinds(filter.Kinds) {
+				return
+			}
+			// Then: original eventstore queries
+			for evt := range originalQueryStored(ctx, filter) {
+				if !yield(evt) {
+					return
+				}
+			}
+		}
+	}
 
 	// Enable negentropy support
 	r.Negentropy = true
 
-	// Setup HTTP routes
-	mux := r.Router()
-
-	// Endpoint to get metric pubkeys for client kind 10040 configuration
-	mux.HandleFunc("/keys", func(w http.ResponseWriter, req *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-
-		response := map[string]interface{}{
-			"pubkeys":      keyManager.GetAllPubKeys(),
-			"kind10040":    keyManager.GetKind10040Tags(config.RelayURL),
-			"relay_url":    config.RelayURL,
-			"user_metrics": keys.UserMetrics,
-			"event_metrics": keys.EventMetrics,
-		}
-		json.NewEncoder(w).Encode(response)
-	})
-
-	// Root endpoint with info
+	// Setup HTTP routes using the relay's router
+	mux := http.NewServeMux()
+	
+	// Delegate to khatru's built-in HTTP handler (WebSocket support)
 	mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
 		// Let Khatru handle WebSocket upgrades
 		if req.Header.Get("Upgrade") == "websocket" {
+			r.ServeHTTP(w, req)
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		// Custom endpoints
+		switch req.URL.Path {
+		case "/keys":
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Access-Control-Allow-Origin", "*")
 
-		response := map[string]interface{}{
-			"name":        "NIP-85 Trusted Assertions Provider",
-			"description": "On-demand computation of user and event metrics",
-			"nip85":       true,
-			"endpoints": map[string]string{
-				"/":     "Relay info / WebSocket",
-				"/keys": "Metric pubkeys for kind 10040 configuration",
-			},
-			"supported_kinds": []int{30382, 30383, 30384},
+			response := map[string]interface{}{
+				"pubkeys":       keyManager.GetAllPubKeys(),
+				"kind10040":     keyManager.GetKind10040Tags(config.RelayURL),
+				"relay_url":     config.RelayURL,
+				"user_metrics":  keys.UserMetrics,
+				"event_metrics": keys.EventMetrics,
+			}
+			json.NewEncoder(w).Encode(response)
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+
+			response := map[string]interface{}{
+				"name":        "NIP-85 Trusted Assertions Provider",
+				"description": "On-demand computation of user and event metrics",
+				"nip85":       true,
+				"endpoints": map[string]string{
+					"/":     "Relay info / WebSocket",
+					"/keys": "Metric pubkeys for kind 10040 configuration",
+				},
+				"supported_kinds": []int{30382, 30383, 30384},
+			}
+			json.NewEncoder(w).Encode(response)
 		}
-		json.NewEncoder(w).Encode(response)
 	})
 
 	log.Printf("Starting NIP-85 relay on :%s", config.Port)
