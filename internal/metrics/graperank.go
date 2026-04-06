@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"fiatjaf.com/nostr"
 	pr "github.com/max-planck-innovation-competition/pagerank/pkg/pagerank"
-	"github.com/nbd-wtf/go-nostr"
 )
 
 const (

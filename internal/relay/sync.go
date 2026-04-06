@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"iter"
 	"log"
 	"strings"
 	"sync"
@@ -11,7 +12,7 @@ import (
 	"cipolin/internal/fetcher"
 	"cipolin/internal/keys"
 
-	"github.com/nbd-wtf/go-nostr"
+	"fiatjaf.com/nostr"
 )
 
 // SyncProgress tracks the progress of an async sync operation
@@ -22,8 +23,8 @@ type SyncProgress struct {
 
 // EventStore interface for querying and saving events
 type EventStore interface {
-	QueryEvents(ctx context.Context, filter nostr.Filter) (chan *nostr.Event, error)
-	SaveEvent(ctx context.Context, event *nostr.Event) error
+	QueryEvents(filter nostr.Filter, maxLimit int) iter.Seq[nostr.Event]
+	SaveEvent(event nostr.Event) error
 }
 
 // Syncer handles event synchronization
@@ -48,31 +49,31 @@ func (s *Syncer) SyncUserEvents(ctx context.Context, pubkey string, userRelays [
 
 	// Filters for user's own relays
 	userFilters := []nostr.Filter{
-		{Authors: []string{pubkey}, Kinds: []int{1}},                    // Posts/replies
-		{Authors: []string{pubkey}, Kinds: []int{7}},                    // Reactions
-		{Kinds: []int{3}, Tags: nostr.TagMap{"p": []string{pubkey}}},    // Followers
-		{Kinds: []int{9735}, Tags: nostr.TagMap{"p": []string{pubkey}}}, // Zaps received
-		{Kinds: []int{9735}, Tags: nostr.TagMap{"P": []string{pubkey}}}, // Zaps sent (P = sender)
-		{Kinds: []int{9321}, Tags: nostr.TagMap{"p": []string{pubkey}}}, // Nutzaps received
-		{Authors: []string{pubkey}, Kinds: []int{9321}},                 // Nutzaps sent
+		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{1}},                    // Posts/replies
+		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{7}},                    // Reactions
+		{Kinds: []nostr.Kind{3}, Tags: nostr.TagMap{"p": []string{pubkey}}},    // Followers
+		{Kinds: []nostr.Kind{9735}, Tags: nostr.TagMap{"p": []string{pubkey}}}, // Zaps received
+		{Kinds: []nostr.Kind{9735}, Tags: nostr.TagMap{"P": []string{pubkey}}}, // Zaps sent (P = sender)
+		{Kinds: []nostr.Kind{9321}, Tags: nostr.TagMap{"p": []string{pubkey}}}, // Nutzaps received
+		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{9321}},                 // Nutzaps sent
 	}
 
 	// Reports should be fetched from popular relays + user relays
 	popularRelays, _ := GetPopularRelays(ctx, s.storageRelays)
 	reportRelays := MergeRelays(popularRelays, userRelays)
 	reportFilters := []nostr.Filter{
-		{Authors: []string{pubkey}, Kinds: []int{1984}},                 // Reports sent
-		{Kinds: []int{1984}, Tags: nostr.TagMap{"p": []string{pubkey}}}, // Reports received
+		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{1984}},                 // Reports sent
+		{Kinds: []nostr.Kind{1984}, Tags: nostr.TagMap{"p": []string{pubkey}}}, // Reports received
 	}
 
 	deadline := time.Now().Add(30 * time.Second)
 
 	// Event handler to store events - must be thread-safe
 	var storeMu sync.Mutex
-	onEvent := func(event *nostr.Event) {
+	onEvent := func(event nostr.Event) {
 		storeMu.Lock()
 		defer storeMu.Unlock()
-		if err := s.db.SaveEvent(ctx, event); err != nil {
+		if err := s.db.SaveEvent(event); err != nil {
 			log.Printf("[sync] Failed to store event: %v", err)
 		}
 	}
@@ -123,43 +124,43 @@ func (s *Syncer) SyncUserEventsAsync(ctx context.Context, pubkey string, userRel
 		var reportFilters []nostr.Filter
 
 		if filterType&keys.FilterPosts != 0 {
-			userFilters = append(userFilters, nostr.Filter{Authors: []string{pubkey}, Kinds: []int{1}})
+			userFilters = append(userFilters, nostr.Filter{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{1}})
 		}
 		if filterType&keys.FilterReactions != 0 {
-			userFilters = append(userFilters, nostr.Filter{Authors: []string{pubkey}, Kinds: []int{7}})
+			userFilters = append(userFilters, nostr.Filter{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{7}})
 		}
 		if filterType&keys.FilterReposts != 0 {
 			userFilters = append(userFilters, nostr.Filter{Authors: []string{pubkey}, Kinds: []int{6}})
 		}
 		if filterType&keys.FilterFollowers != 0 {
-			userFilters = append(userFilters, nostr.Filter{Kinds: []int{3}, Tags: nostr.TagMap{"p": []string{pubkey}}})
+			userFilters = append(userFilters, nostr.Filter{Kinds: []nostr.Kind{3}, Tags: nostr.TagMap{"p": []string{pubkey}}})
 		}
 		if filterType&keys.FilterZapsRecd != 0 {
-			userFilters = append(userFilters, nostr.Filter{Kinds: []int{9735}, Tags: nostr.TagMap{"p": []string{pubkey}}})
-			userFilters = append(userFilters, nostr.Filter{Kinds: []int{9321}, Tags: nostr.TagMap{"p": []string{pubkey}}})
+			userFilters = append(userFilters, nostr.Filter{Kinds: []nostr.Kind{9735}, Tags: nostr.TagMap{"p": []string{pubkey}}})
+			userFilters = append(userFilters, nostr.Filter{Kinds: []nostr.Kind{9321}, Tags: nostr.TagMap{"p": []string{pubkey}}})
 		}
 		if filterType&keys.FilterZapsSent != 0 {
-			userFilters = append(userFilters, nostr.Filter{Kinds: []int{9735}, Tags: nostr.TagMap{"P": []string{pubkey}}})
-			userFilters = append(userFilters, nostr.Filter{Authors: []string{pubkey}, Kinds: []int{9321}})
+			userFilters = append(userFilters, nostr.Filter{Kinds: []nostr.Kind{9735}, Tags: nostr.TagMap{"P": []string{pubkey}}})
+			userFilters = append(userFilters, nostr.Filter{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{9321}})
 		}
 		if filterType&keys.FilterReportsRecd != 0 {
-			reportFilters = append(reportFilters, nostr.Filter{Kinds: []int{1984}, Tags: nostr.TagMap{"p": []string{pubkey}}})
+			reportFilters = append(reportFilters, nostr.Filter{Kinds: []nostr.Kind{1984}, Tags: nostr.TagMap{"p": []string{pubkey}}})
 		}
 		if filterType&keys.FilterReportsSent != 0 {
-			reportFilters = append(reportFilters, nostr.Filter{Authors: []string{pubkey}, Kinds: []int{1984}})
+			reportFilters = append(reportFilters, nostr.Filter{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{1984}})
 		}
 
 		deadline := time.Now().Add(30 * time.Second)
 
 		// Event handler to store events and track count
 		var storeMu sync.Mutex
-		onEvent := func(event *nostr.Event) {
+		onEvent := func(event nostr.Event) {
 			if ctx.Err() != nil {
 				return
 			}
 			storeMu.Lock()
 			defer storeMu.Unlock()
-			if err := s.db.SaveEvent(ctx, event); err != nil {
+			if err := s.db.SaveEvent(event); err != nil {
 				log.Printf("[sync-async] Failed to store event: %v", err)
 			}
 			atomic.AddInt64(&progress.EventCount, 1)
@@ -233,12 +234,12 @@ func (s *Syncer) SyncEventInteractionsAsync(ctx context.Context, eventID string)
 		log.Printf("[sync-async] Fetching interactions for event %s...", eventID[:16]+"...")
 
 		filters := []nostr.Filter{
-			{Kinds: []int{1}, Tags: nostr.TagMap{"e": []string{eventID}}},    // Replies
-			{Kinds: []int{1}, Tags: nostr.TagMap{"q": []string{eventID}}},    // Quotes
-			{Kinds: []int{6}, Tags: nostr.TagMap{"e": []string{eventID}}},    // Reposts
-			{Kinds: []int{7}, Tags: nostr.TagMap{"e": []string{eventID}}},    // Reactions
-			{Kinds: []int{9735}, Tags: nostr.TagMap{"e": []string{eventID}}}, // Zaps
-			{Kinds: []int{9321}, Tags: nostr.TagMap{"e": []string{eventID}}}, // Nutzaps
+			{Kinds: []nostr.Kind{1}, Tags: nostr.TagMap{"e": []string{eventID}}},    // Replies
+			{Kinds: []nostr.Kind{1}, Tags: nostr.TagMap{"q": []string{eventID}}},    // Quotes
+			{Kinds: []nostr.Kind{6}, Tags: nostr.TagMap{"e": []string{eventID}}},    // Reposts
+			{Kinds: []nostr.Kind{7}, Tags: nostr.TagMap{"e": []string{eventID}}},    // Reactions
+			{Kinds: []nostr.Kind{9735}, Tags: nostr.TagMap{"e": []string{eventID}}}, // Zaps
+			{Kinds: []nostr.Kind{9321}, Tags: nostr.TagMap{"e": []string{eventID}}}, // Nutzaps
 		}
 
 		popularRelays, _ := GetPopularRelays(ctx, s.storageRelays)
@@ -247,11 +248,11 @@ func (s *Syncer) SyncEventInteractionsAsync(ctx context.Context, eventID string)
 
 		deadline := time.Now().Add(30 * time.Second)
 
-		onEvent := func(event *nostr.Event) {
+		onEvent := func(event nostr.Event) {
 			if ctx.Err() != nil {
 				return
 			}
-			if err := s.db.SaveEvent(ctx, event); err != nil {
+			if err := s.db.SaveEvent(event); err != nil {
 				log.Printf("[sync-async] Failed to store event: %v", err)
 			}
 			atomic.AddInt64(&progress.EventCount, 1)
@@ -287,11 +288,11 @@ func (s *Syncer) SyncAddressInteractionsAsync(ctx context.Context, address strin
 		log.Printf("[sync-async] Fetching interactions for address %s...", address)
 
 		filters := []nostr.Filter{
-			{Kinds: []int{1}, Tags: nostr.TagMap{"a": []string{address}}},     // Comments
-			{Kinds: []int{6, 16}, Tags: nostr.TagMap{"a": []string{address}}}, // Reposts
-			{Kinds: []int{7}, Tags: nostr.TagMap{"a": []string{address}}},     // Reactions
-			{Kinds: []int{9735}, Tags: nostr.TagMap{"a": []string{address}}},  // Zaps
-			{Kinds: []int{9321}, Tags: nostr.TagMap{"a": []string{address}}},  // Nutzaps
+			{Kinds: []nostr.Kind{1}, Tags: nostr.TagMap{"a": []string{address}}},     // Comments
+			{Kinds: []nostr.Kind{6, 16}, Tags: nostr.TagMap{"a": []string{address}}}, // Reposts
+			{Kinds: []nostr.Kind{7}, Tags: nostr.TagMap{"a": []string{address}}},     // Reactions
+			{Kinds: []nostr.Kind{9735}, Tags: nostr.TagMap{"a": []string{address}}},  // Zaps
+			{Kinds: []nostr.Kind{9321}, Tags: nostr.TagMap{"a": []string{address}}},  // Nutzaps
 		}
 
 		popularRelays, _ := GetPopularRelays(ctx, s.storageRelays)
@@ -300,11 +301,11 @@ func (s *Syncer) SyncAddressInteractionsAsync(ctx context.Context, address strin
 
 		deadline := time.Now().Add(30 * time.Second)
 
-		onEvent := func(event *nostr.Event) {
+		onEvent := func(event nostr.Event) {
 			if ctx.Err() != nil {
 				return
 			}
-			if err := s.db.SaveEvent(ctx, event); err != nil {
+			if err := s.db.SaveEvent(event); err != nil {
 				log.Printf("[sync-async] Failed to store event: %v", err)
 			}
 			atomic.AddInt64(&progress.EventCount, 1)
@@ -328,12 +329,12 @@ func (s *Syncer) SyncEventInteractions(ctx context.Context, eventID string) erro
 	log.Printf("[sync] Fetching interactions for event %s...", eventID[:16]+"...")
 
 	filters := []nostr.Filter{
-		{Kinds: []int{1}, Tags: nostr.TagMap{"e": []string{eventID}}},    // Replies
-		{Kinds: []int{1}, Tags: nostr.TagMap{"q": []string{eventID}}},    // Quotes
-		{Kinds: []int{6}, Tags: nostr.TagMap{"e": []string{eventID}}},    // Reposts
-		{Kinds: []int{7}, Tags: nostr.TagMap{"e": []string{eventID}}},    // Reactions
-		{Kinds: []int{9735}, Tags: nostr.TagMap{"e": []string{eventID}}}, // Zaps
-		{Kinds: []int{9321}, Tags: nostr.TagMap{"e": []string{eventID}}}, // Nutzaps
+		{Kinds: []nostr.Kind{1}, Tags: nostr.TagMap{"e": []string{eventID}}},    // Replies
+		{Kinds: []nostr.Kind{1}, Tags: nostr.TagMap{"q": []string{eventID}}},    // Quotes
+		{Kinds: []nostr.Kind{6}, Tags: nostr.TagMap{"e": []string{eventID}}},    // Reposts
+		{Kinds: []nostr.Kind{7}, Tags: nostr.TagMap{"e": []string{eventID}}},    // Reactions
+		{Kinds: []nostr.Kind{9735}, Tags: nostr.TagMap{"e": []string{eventID}}}, // Zaps
+		{Kinds: []nostr.Kind{9321}, Tags: nostr.TagMap{"e": []string{eventID}}}, // Nutzaps
 	}
 
 	popularRelays, _ := GetPopularRelays(ctx, s.storageRelays)
@@ -344,8 +345,8 @@ func (s *Syncer) SyncEventInteractions(ctx context.Context, eventID string) erro
 
 	deadline := time.Now().Add(30 * time.Second)
 
-	onEvent := func(event *nostr.Event) {
-		if err := s.db.SaveEvent(ctx, event); err != nil {
+	onEvent := func(event nostr.Event) {
+		if err := s.db.SaveEvent(event); err != nil {
 			log.Printf("[sync] Failed to store event: %v", err)
 		}
 	}
@@ -361,11 +362,11 @@ func (s *Syncer) SyncAddressInteractions(ctx context.Context, address string) er
 	log.Printf("[sync] Fetching interactions for address %s...", address)
 
 	filters := []nostr.Filter{
-		{Kinds: []int{1}, Tags: nostr.TagMap{"a": []string{address}}},     // Comments
-		{Kinds: []int{6, 16}, Tags: nostr.TagMap{"a": []string{address}}}, // Reposts
-		{Kinds: []int{7}, Tags: nostr.TagMap{"a": []string{address}}},     // Reactions
-		{Kinds: []int{9735}, Tags: nostr.TagMap{"a": []string{address}}},  // Zaps
-		{Kinds: []int{9321}, Tags: nostr.TagMap{"a": []string{address}}},  // Nutzaps
+		{Kinds: []nostr.Kind{1}, Tags: nostr.TagMap{"a": []string{address}}},     // Comments
+		{Kinds: []nostr.Kind{6, 16}, Tags: nostr.TagMap{"a": []string{address}}}, // Reposts
+		{Kinds: []nostr.Kind{7}, Tags: nostr.TagMap{"a": []string{address}}},     // Reactions
+		{Kinds: []nostr.Kind{9735}, Tags: nostr.TagMap{"a": []string{address}}},  // Zaps
+		{Kinds: []nostr.Kind{9321}, Tags: nostr.TagMap{"a": []string{address}}},  // Nutzaps
 	}
 
 	popularRelays, _ := GetPopularRelays(ctx, s.storageRelays)
@@ -376,8 +377,8 @@ func (s *Syncer) SyncAddressInteractions(ctx context.Context, address string) er
 
 	deadline := time.Now().Add(30 * time.Second)
 
-	onEvent := func(event *nostr.Event) {
-		if err := s.db.SaveEvent(ctx, event); err != nil {
+	onEvent := func(event nostr.Event) {
+		if err := s.db.SaveEvent(event); err != nil {
 			log.Printf("[sync] Failed to store event: %v", err)
 		}
 	}
@@ -426,32 +427,30 @@ func (s *Syncer) getAddressAuthorRelays(ctx context.Context, address string) []s
 // getEventAuthorRelays fetches the event to get its author, then returns the author's relays
 func (s *Syncer) getEventAuthorRelays(ctx context.Context, eventID string, fallbackRelays []string) []string {
 	// First try local DB
-	filter := nostr.Filter{IDs: []string{eventID}}
-	ch, err := s.db.QueryEvents(ctx, filter)
-	if err == nil {
-		for event := range ch {
-			if event != nil {
-				relays, _ := GetUserNIP65Relays(ctx, s.storageRelays, event.PubKey)
-				return relays
-			}
-		}
+	filter := nostr.Filter{IDs: []nostr.ID{nostr.MustIDFromHex(eventID)}}
+	for event := range s.db.QueryEvents(filter, 1) {
+		relays, _ := GetUserNIP65Relays(ctx, s.storageRelays, event.PubKey.Hex())
+		return relays
 	}
 
 	// Try fetching from popular relays
 	for _, relayURL := range fallbackRelays {
-		relay, err := nostr.RelayConnect(ctx, relayURL)
+		relay, err := nostr.RelayConnect(ctx, relayURL, nostr.RelayOptions{})
 		if err != nil {
 			continue
 		}
 
-		events, err := relay.QuerySync(ctx, filter)
+		var events []nostr.Event
+		for event := range relay.QueryEvents(filter) {
+			events = append(events, event)
+		}
 		relay.Close()
 
-		if err != nil || len(events) == 0 {
+		if len(events) == 0 {
 			continue
 		}
 
-		relays, _ := GetUserNIP65Relays(ctx, s.storageRelays, events[0].PubKey)
+		relays, _ := GetUserNIP65Relays(ctx, s.storageRelays, events[0].PubKey.Hex())
 		return relays
 	}
 

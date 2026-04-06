@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nbd-wtf/go-nostr"
+	"fiatjaf.com/nostr"
 )
 
 // Default fetch configuration
@@ -53,7 +53,7 @@ func (f *EventFetcher) FetchEvents(
 	relay string,
 	filter nostr.Filter,
 	direction FetchDirection,
-	onEvent func(*nostr.Event),
+	onEvent func(nostr.Event),
 ) (*FetchResult, error) {
 	cursor, err := f.cursorStore.LoadCursor(relay, filter)
 	if err != nil {
@@ -82,7 +82,7 @@ func (f *EventFetcher) fetchBackward(
 	relayURL string,
 	filter nostr.Filter,
 	cursor *FetchCursor,
-	onEvent func(*nostr.Event),
+	onEvent func(nostr.Event),
 ) (*FetchResult, error) {
 	// Skip if we've already reached the beginning
 	if cursor.ReachedBeginning {
@@ -98,7 +98,7 @@ func (f *EventFetcher) fetchBackward(
 	ctx, cancel := context.WithTimeout(ctx, f.config.FetchTimeout)
 	defer cancel()
 
-	relay, err := nostr.RelayConnect(ctx, relayURL)
+	relay, err := nostr.RelayConnect(ctx, relayURL, nostr.RelayOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to relay %s: %w", relayURL, err)
 	}
@@ -112,26 +112,25 @@ func (f *EventFetcher) fetchBackward(
 	}
 
 	// Build query filter with until timestamp
-	untilTs := nostr.Timestamp(until)
 	queryFilter := nostr.Filter{
 		IDs:     filter.IDs,
 		Authors: filter.Authors,
 		Kinds:   filter.Kinds,
 		Tags:    filter.Tags,
-		Until:   &untilTs,
+		Until:   nostr.Timestamp(until),
 		Limit:   f.config.FetchLimit,
 	}
 
 	// Query events
-	events, err := relay.QuerySync(ctx, queryFilter)
-	if err != nil {
-		return nil, fmt.Errorf("query failed: %w", err)
+	var events []nostr.Event
+	for event := range relay.QueryEvents(queryFilter) {
+		events = append(events, event)
 	}
 
 	// Filter out boundary duplicates
-	var newEvents []*nostr.Event
+	var newEvents []nostr.Event
 	for _, event := range events {
-		if !cursor.OldestBoundaryIDs[event.ID] {
+		if !cursor.OldestBoundaryIDs[event.ID.Hex()] {
 			newEvents = append(newEvents, event)
 			if onEvent != nil {
 				onEvent(event)
@@ -157,7 +156,7 @@ func (f *EventFetcher) fetchBackward(
 			// Same boundary, add new IDs
 			for _, e := range newEvents {
 				if int64(e.CreatedAt) == *oldestTimestamp {
-					cursor.OldestBoundaryIDs[e.ID] = true
+					cursor.OldestBoundaryIDs[e.ID.Hex()] = true
 				}
 			}
 		} else {
@@ -165,7 +164,7 @@ func (f *EventFetcher) fetchBackward(
 			cursor.OldestBoundaryIDs = make(map[string]bool)
 			for _, e := range newEvents {
 				if int64(e.CreatedAt) == *oldestTimestamp {
-					cursor.OldestBoundaryIDs[e.ID] = true
+					cursor.OldestBoundaryIDs[e.ID.Hex()] = true
 				}
 			}
 		}
@@ -178,7 +177,7 @@ func (f *EventFetcher) fetchBackward(
 		cursor.NewestBoundaryIDs = make(map[string]bool)
 		for _, e := range newEvents {
 			if int64(e.CreatedAt) == *newestTimestamp {
-				cursor.NewestBoundaryIDs[e.ID] = true
+				cursor.NewestBoundaryIDs[e.ID.Hex()] = true
 			}
 		}
 	}
@@ -214,7 +213,7 @@ func (f *EventFetcher) fetchForward(
 	relayURL string,
 	filter nostr.Filter,
 	cursor *FetchCursor,
-	onEvent func(*nostr.Event),
+	onEvent func(nostr.Event),
 ) (*FetchResult, error) {
 	// Skip if no previous fetch exists
 	if cursor.NewestFetched == nil {
@@ -229,7 +228,7 @@ func (f *EventFetcher) fetchForward(
 	ctx, cancel := context.WithTimeout(ctx, f.config.FetchTimeout)
 	defer cancel()
 
-	relay, err := nostr.RelayConnect(ctx, relayURL)
+	relay, err := nostr.RelayConnect(ctx, relayURL, nostr.RelayOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to relay %s: %w", relayURL, err)
 	}
@@ -237,30 +236,28 @@ func (f *EventFetcher) fetchForward(
 
 	since := *cursor.NewestFetched
 	now := time.Now().Unix()
-	sinceTs := nostr.Timestamp(since)
-	untilTs := nostr.Timestamp(now)
 
 	queryFilter := nostr.Filter{
 		IDs:     filter.IDs,
 		Authors: filter.Authors,
 		Kinds:   filter.Kinds,
 		Tags:    filter.Tags,
-		Since:   &sinceTs,
-		Until:   &untilTs,
+		Since:   nostr.Timestamp(since),
+		Until:   nostr.Timestamp(now),
 		Limit:   f.config.FetchLimit,
 	}
 
-	events, err := relay.QuerySync(ctx, queryFilter)
-	if err != nil {
-		return nil, fmt.Errorf("query failed: %w", err)
+	var events []nostr.Event
+	for event := range relay.QueryEvents(queryFilter) {
+		events = append(events, event)
 	}
 
 	// Filter boundary duplicates and find newest
-	var newEvents []*nostr.Event
+	var newEvents []nostr.Event
 	var newestTimestamp *int64
 
 	for _, event := range events {
-		if !cursor.NewestBoundaryIDs[event.ID] {
+		if !cursor.NewestBoundaryIDs[event.ID.Hex()] {
 			newEvents = append(newEvents, event)
 			if onEvent != nil {
 				onEvent(event)
@@ -278,7 +275,7 @@ func (f *EventFetcher) fetchForward(
 		cursor.NewestBoundaryIDs = make(map[string]bool)
 		for _, e := range newEvents {
 			if int64(e.CreatedAt) == *newestTimestamp {
-				cursor.NewestBoundaryIDs[e.ID] = true
+				cursor.NewestBoundaryIDs[e.ID.Hex()] = true
 			}
 		}
 	}
@@ -304,7 +301,7 @@ func (f *EventFetcher) FetchContinuously(
 	filter nostr.Filter,
 	direction FetchDirection,
 	deadline time.Time,
-	onEvent func(*nostr.Event),
+	onEvent func(nostr.Event),
 ) (totalEvents int, reachedEnd bool, timedOut bool, skippedTTL bool, err error) {
 	isFirstIteration := true
 
@@ -362,14 +359,14 @@ func (f *EventFetcher) FetchAllContinuously(
 	filters []nostr.Filter,
 	direction FetchDirection,
 	deadline time.Time,
-	onEvent func(*nostr.Event),
+	onEvent func(nostr.Event),
 ) []ContinuousFetchSummary {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	var results []ContinuousFetchSummary
 
 	// Wrap onEvent with mutex for thread safety
-	safeOnEvent := func(event *nostr.Event) {
+	safeOnEvent := func(event nostr.Event) {
 		if onEvent != nil {
 			mu.Lock()
 			onEvent(event)

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"iter"
 	"log"
 	"strconv"
 	"strings"
@@ -12,7 +13,7 @@ import (
 	"cipolin/internal/metrics"
 	"cipolin/internal/relay"
 
-	"github.com/nbd-wtf/go-nostr"
+	"fiatjaf.com/nostr"
 )
 
 // Update interval for lazy loading
@@ -45,13 +46,9 @@ func NewHandler(syncer *relay.Syncer, db metrics.EventStore, storageRelays []str
 	}
 }
 
-// HandleNIP85Query intercepts queries for NIP-85 kinds and generates assertions on-demand with lazy loading
-func (h *Handler) HandleNIP85Query(ctx context.Context, filter nostr.Filter) (chan *nostr.Event, error) {
-	ch := make(chan *nostr.Event)
-
-	go func() {
-		defer close(ch)
-
+// HandleNIP85QueryQueryStored intercepts queries for NIP-85 kinds and generates assertions on-demand with lazy loading
+func (h *Handler) HandleNIP85QueryQueryStored(ctx context.Context, filter nostr.Filter) iter.Seq[nostr.Event] {
+	return func(yield func(nostr.Event) bool) {
 		// Only handle NIP-85 kinds
 		if !containsNIP85Kind(filter.Kinds) {
 			return
@@ -68,7 +65,7 @@ func (h *Handler) HandleNIP85Query(ctx context.Context, filter nostr.Filter) (ch
 		// Build set of requested author pubkeys (metric filters)
 		requestedAuthors := make(map[string]bool)
 		for _, author := range filter.Authors {
-			requestedAuthors[author] = true
+			requestedAuthors[author.Hex()] = true
 		}
 
 		for _, kind := range filter.Kinds {
@@ -78,15 +75,13 @@ func (h *Handler) HandleNIP85Query(ctx context.Context, filter nostr.Filter) (ch
 					// Use streaming/lazy loading for user assertions
 					h.streamUserAssertions(ctx, subject, requesterPubkey, requestedAuthors, ch)
 				case KindEventAssertion:
-					h.streamEventAssertions(ctx, subject, requestedAuthors, ch)
+					h.streamEventAssertions(ctx, subject, requestedAuthors, yield)
 				case KindAddressAssertion:
-					h.streamAddressAssertions(ctx, subject, requestedAuthors, ch)
+					h.streamAddressAssertions(ctx, subject, requestedAuthors, yield)
 				}
 			}
 		}
-	}()
-
-	return ch, nil
+	}
 }
 
 func extractRequesterPubkey(filter nostr.Filter) string {
@@ -108,29 +103,29 @@ func truncateSubject(s string) string {
 }
 
 // publishToStorageRelays publishes an event to all storage relays
-func (h *Handler) publishToStorageRelays(event *nostr.Event) {
+func (h *Handler) publishToStorageRelays(event nostr.Event) {
 	for _, relayURL := range h.storageRelays {
 		go func(url string) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
-			r, err := nostr.RelayConnect(ctx, url)
+			r, err := nostr.RelayConnect(ctx, url, nostr.RelayOptions{})
 			if err != nil {
 				log.Printf("[publish] Failed to connect to %s: %v", url, err)
 				return
 			}
 			defer r.Close()
 
-			if err := r.Publish(ctx, *event); err != nil {
+			if err := r.Publish(ctx, event); err != nil {
 				log.Printf("[publish] Failed to publish to %s: %v", url, err)
 				return
 			}
-			log.Printf("[publish] Published %s to %s", event.ID[:16]+"...", url)
+			log.Printf("[publish] Published %s to %s", event.ID.String()[:16]+"...", url)
 		}(relayURL)
 	}
 }
 
-func containsNIP85Kind(kinds []int) bool {
+func containsNIP85Kind(kinds []nostr.Kind) bool {
 	for _, k := range kinds {
 		if k == KindUserAssertion || k == KindEventAssertion || k == KindAddressAssertion {
 			return true
@@ -140,9 +135,9 @@ func containsNIP85Kind(kinds []int) bool {
 }
 
 // createMetricEvent creates and signs an event for a single metric
-func (h *Handler) createMetricEvent(kind int, subject string, metric string, value string, extraTags ...nostr.Tag) (*nostr.Event, error) {
-	event := &nostr.Event{
-		Kind:      kind,
+func (h *Handler) createMetricEvent(kind int, subject string, metric string, value string, extraTags ...nostr.Tag) (nostr.Event, error) {
+	event := nostr.Event{
+		Kind:      nostr.Kind(kind),
 		CreatedAt: nostr.Timestamp(time.Now().Unix()),
 		Tags: nostr.Tags{
 			{"d", subject},
@@ -157,8 +152,8 @@ func (h *Handler) createMetricEvent(kind int, subject string, metric string, val
 	}
 
 	// Sign with metric-specific key
-	if err := h.keyManager.SignEventForMetric(event, metric); err != nil {
-		return nil, err
+	if err := h.keyManager.SignEventForMetric(&event, metric); err != nil {
+		return nostr.Event{}, err
 	}
 
 	return event, nil
@@ -245,16 +240,11 @@ func (h *Handler) streamUserAssertions(ctx context.Context, pubkey, requesterPub
 
 // sendUserMetrics computes and sends user metric events
 // isFinal indicates this is the last update (publish to storage relays)
-func (h *Handler) sendUserMetrics(ctx context.Context, pubkey, requesterPubkey string, requestedAuthors map[string]bool, ch chan *nostr.Event, isFinal bool) {
+func (h *Handler) sendUserMetrics(ctx context.Context, pubkey string, requestedAuthors map[string]bool, yield func(nostr.Event) bool, isFinal bool) {
 	pTag := nostr.Tag{"p", pubkey}
 
 	// Always compute from local DB (returns 0s if no data)
-	m := metrics.ComputeUserMetrics(ctx, h.db, pubkey)
-	if h.rankEngine != nil {
-		if rank, ok := h.rankEngine.GetRank(ctx, requesterPubkey, pubkey); ok {
-			m["rank"] = strconv.Itoa(rank)
-		}
-	}
+	m := metrics.ComputeUserMetrics(h.db, pubkey)
 
 	metricNames := []string{
 		"followers", "rank", "first_created_at",
@@ -276,13 +266,11 @@ func (h *Handler) sendUserMetrics(ctx context.Context, pubkey, requesterPubkey s
 			continue
 		}
 
-		select {
-		case ch <- event:
-			// Only publish to storage relays on final update
-			if isFinal {
-				h.publishToStorageRelays(event)
-			}
-		case <-ctx.Done():
+		// Only publish to storage relays on final update
+		if isFinal {
+			h.publishToStorageRelays(event)
+		}
+		if !yield(event) {
 			return
 		}
 	}
@@ -290,7 +278,7 @@ func (h *Handler) sendUserMetrics(ctx context.Context, pubkey, requesterPubkey s
 	// Handle topics
 	if h.shouldGenerateMetric("t", requestedAuthors) {
 		if topics, ok := m["_topics"]; ok && topics != "" {
-			topicEvent := &nostr.Event{
+			topicEvent := nostr.Event{
 				Kind:      KindUserAssertion,
 				CreatedAt: nostr.Timestamp(time.Now().Unix()),
 				Tags: nostr.Tags{
@@ -304,15 +292,11 @@ func (h *Handler) sendUserMetrics(ctx context.Context, pubkey, requesterPubkey s
 					topicEvent.Tags = append(topicEvent.Tags, nostr.Tag{"t", topic})
 				}
 			}
-			if err := h.keyManager.SignEventForMetric(topicEvent, "t"); err == nil {
-				select {
-				case ch <- topicEvent:
-					if isFinal {
-						h.publishToStorageRelays(topicEvent)
-					}
-				case <-ctx.Done():
-					return
+			if err := h.keyManager.SignEventForMetric(&topicEvent, "t"); err == nil {
+				if isFinal {
+					h.publishToStorageRelays(topicEvent)
 				}
+				yield(topicEvent)
 			}
 		}
 	}
@@ -349,7 +333,7 @@ func (h *Handler) generateUserAssertions(ctx context.Context, pubkey, requesterP
 
 	log.Printf("[handler] Metrics computed for %s, building events...", pubkey[:16]+"...")
 
-	var events []*nostr.Event
+	var events []nostr.Event
 	pTag := nostr.Tag{"p", pubkey}
 
 	// Create one event per metric
@@ -393,7 +377,7 @@ func (h *Handler) generateUserAssertions(ctx context.Context, pubkey, requesterP
 	// Handle topics separately (multiple t tags in one event)
 	if h.shouldGenerateMetric("t", requestedAuthors) {
 		if topics, ok := m["_topics"]; ok && topics != "" {
-			topicEvent := &nostr.Event{
+			topicEvent := nostr.Event{
 				Kind:      KindUserAssertion,
 				CreatedAt: nostr.Timestamp(time.Now().Unix()),
 				Tags: nostr.Tags{
@@ -407,7 +391,7 @@ func (h *Handler) generateUserAssertions(ctx context.Context, pubkey, requesterP
 					topicEvent.Tags = append(topicEvent.Tags, nostr.Tag{"t", topic})
 				}
 			}
-			if err := h.keyManager.SignEventForMetric(topicEvent, "t"); err == nil {
+			if err := h.keyManager.SignEventForMetric(&topicEvent, "t"); err == nil {
 				events = append(events, topicEvent)
 				h.publishToStorageRelays(topicEvent)
 			}
@@ -418,7 +402,7 @@ func (h *Handler) generateUserAssertions(ctx context.Context, pubkey, requesterP
 }
 
 // streamEventAssertions streams event assertions with lazy loading
-func (h *Handler) streamEventAssertions(ctx context.Context, eventID string, requestedAuthors map[string]bool, ch chan *nostr.Event) {
+func (h *Handler) streamEventAssertions(ctx context.Context, eventID string, requestedAuthors map[string]bool, yield func(nostr.Event) bool) {
 	if len(eventID) != 64 {
 		return
 	}
@@ -426,7 +410,7 @@ func (h *Handler) streamEventAssertions(ctx context.Context, eventID string, req
 	log.Printf("[handler] Starting lazy load for event %s", eventID[:16]+"...")
 
 	// Send initial metrics from local DB
-	h.sendEventMetrics(ctx, eventID, requestedAuthors, ch, false)
+	h.sendEventMetrics(ctx, eventID, requestedAuthors, yield, false)
 
 	// Start async sync
 	progress := h.syncer.SyncEventInteractionsAsync(ctx, eventID)
@@ -442,22 +426,22 @@ func (h *Handler) streamEventAssertions(ctx context.Context, eventID string, req
 			return
 		case <-progress.Done:
 			log.Printf("[handler] Sync complete for event %s, sending final metrics", eventID[:16]+"...")
-			h.sendEventMetrics(ctx, eventID, requestedAuthors, ch, true)
+			h.sendEventMetrics(ctx, eventID, requestedAuthors, yield, true)
 			return
 		case <-ticker.C:
 			currentCount := atomic.LoadInt64(&progress.EventCount)
 			if currentCount > lastEventCount {
 				lastEventCount = currentCount
-				h.sendEventMetrics(ctx, eventID, requestedAuthors, ch, false)
+				h.sendEventMetrics(ctx, eventID, requestedAuthors, yield, false)
 			}
 		}
 	}
 }
 
 // sendEventMetrics computes and sends event metric events
-func (h *Handler) sendEventMetrics(ctx context.Context, eventID string, requestedAuthors map[string]bool, ch chan *nostr.Event, isFinal bool) {
+func (h *Handler) sendEventMetrics(ctx context.Context, eventID string, requestedAuthors map[string]bool, yield func(nostr.Event) bool, isFinal bool) {
 	eTag := nostr.Tag{"e", eventID}
-	m := metrics.ComputeEventMetrics(ctx, h.db, eventID)
+	m := metrics.ComputeEventMetrics(h.db, eventID)
 
 	metricNames := []string{"comment_cnt", "quote_cnt", "repost_cnt", "reaction_cnt", "zap_cnt", "zap_amount", "rank"}
 
@@ -471,23 +455,21 @@ func (h *Handler) sendEventMetrics(ctx context.Context, eventID string, requeste
 			continue
 		}
 
-		select {
-		case ch <- event:
-			if isFinal {
-				h.publishToStorageRelays(event)
-			}
-		case <-ctx.Done():
+		if isFinal {
+			h.publishToStorageRelays(event)
+		}
+		if !yield(event) {
 			return
 		}
 	}
 }
 
 // streamAddressAssertions streams address assertions with lazy loading
-func (h *Handler) streamAddressAssertions(ctx context.Context, address string, requestedAuthors map[string]bool, ch chan *nostr.Event) {
+func (h *Handler) streamAddressAssertions(ctx context.Context, address string, requestedAuthors map[string]bool, yield func(nostr.Event) bool) {
 	log.Printf("[handler] Starting lazy load for address %s", address)
 
 	// Send initial metrics from local DB
-	h.sendAddressMetrics(ctx, address, requestedAuthors, ch, false)
+	h.sendAddressMetrics(ctx, address, requestedAuthors, yield, false)
 
 	// Start async sync
 	progress := h.syncer.SyncAddressInteractionsAsync(ctx, address)
@@ -503,22 +485,22 @@ func (h *Handler) streamAddressAssertions(ctx context.Context, address string, r
 			return
 		case <-progress.Done:
 			log.Printf("[handler] Sync complete for address %s, sending final metrics", address)
-			h.sendAddressMetrics(ctx, address, requestedAuthors, ch, true)
+			h.sendAddressMetrics(ctx, address, requestedAuthors, yield, true)
 			return
 		case <-ticker.C:
 			currentCount := atomic.LoadInt64(&progress.EventCount)
 			if currentCount > lastEventCount {
 				lastEventCount = currentCount
-				h.sendAddressMetrics(ctx, address, requestedAuthors, ch, false)
+				h.sendAddressMetrics(ctx, address, requestedAuthors, yield, false)
 			}
 		}
 	}
 }
 
 // sendAddressMetrics computes and sends address metric events
-func (h *Handler) sendAddressMetrics(ctx context.Context, address string, requestedAuthors map[string]bool, ch chan *nostr.Event, isFinal bool) {
+func (h *Handler) sendAddressMetrics(ctx context.Context, address string, requestedAuthors map[string]bool, yield func(nostr.Event) bool, isFinal bool) {
 	aTag := nostr.Tag{"a", address}
-	m := metrics.ComputeAddressMetrics(ctx, h.db, address)
+	m := metrics.ComputeAddressMetrics(h.db, address)
 
 	metricNames := []string{"comment_cnt", "quote_cnt", "repost_cnt", "reaction_cnt", "zap_cnt", "zap_amount", "rank"}
 
@@ -532,19 +514,17 @@ func (h *Handler) sendAddressMetrics(ctx context.Context, address string, reques
 			continue
 		}
 
-		select {
-		case ch <- event:
-			if isFinal {
-				h.publishToStorageRelays(event)
-			}
-		case <-ctx.Done():
+		if isFinal {
+			h.publishToStorageRelays(event)
+		}
+		if !yield(event) {
 			return
 		}
 	}
 }
 
 // generateEventAssertions creates kind 30383 assertions for an event ID (one per metric) - blocking version
-func (h *Handler) generateEventAssertions(ctx context.Context, eventID string, requestedAuthors map[string]bool) ([]*nostr.Event, error) {
+func (h *Handler) generateEventAssertions(ctx context.Context, eventID string, requestedAuthors map[string]bool) ([]nostr.Event, error) {
 	if len(eventID) != 64 {
 		return nil, nil
 	}
@@ -557,9 +537,9 @@ func (h *Handler) generateEventAssertions(ctx context.Context, eventID string, r
 	}
 
 	// Compute metrics from local DB
-	m := metrics.ComputeEventMetrics(ctx, h.db, eventID)
+	m := metrics.ComputeEventMetrics(h.db, eventID)
 
-	var events []*nostr.Event
+	var events []nostr.Event
 	eTag := nostr.Tag{"e", eventID}
 
 	metricValues := []struct {
@@ -594,7 +574,7 @@ func (h *Handler) generateEventAssertions(ctx context.Context, eventID string, r
 }
 
 // generateAddressAssertions creates kind 30384 assertions for an event address (one per metric)
-func (h *Handler) generateAddressAssertions(ctx context.Context, address string, requestedAuthors map[string]bool) ([]*nostr.Event, error) {
+func (h *Handler) generateAddressAssertions(ctx context.Context, address string, requestedAuthors map[string]bool) ([]nostr.Event, error) {
 	log.Printf("[handler] Generating address assertions for %s", address)
 
 	// Sync interactions for this address
@@ -603,9 +583,9 @@ func (h *Handler) generateAddressAssertions(ctx context.Context, address string,
 	}
 
 	// Compute metrics from local DB
-	m := metrics.ComputeAddressMetrics(ctx, h.db, address)
+	m := metrics.ComputeAddressMetrics(h.db, address)
 
-	var events []*nostr.Event
+	var events []nostr.Event
 	aTag := nostr.Tag{"a", address}
 
 	metricValues := []struct {
@@ -640,7 +620,7 @@ func (h *Handler) generateAddressAssertions(ctx context.Context, address string,
 }
 
 // IsOnlyNIP85Kinds checks if kinds slice only contains NIP-85 kinds
-func IsOnlyNIP85Kinds(kinds []int) bool {
+func IsOnlyNIP85Kinds(kinds []nostr.Kind) bool {
 	if len(kinds) == 0 {
 		return false
 	}

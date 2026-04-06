@@ -6,7 +6,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/nbd-wtf/go-nostr"
+	"fiatjaf.com/nostr"
 )
 
 // GetPopularRelays fetches popular online relays from Breccia's kind 6301 events
@@ -15,28 +15,32 @@ func GetPopularRelays(ctx context.Context, storageRelays []string) ([]string, er
 	defer cancel()
 
 	filter := nostr.Filter{
-		Kinds: []int{6301},
+		Kinds: []nostr.Kind{nostr.Kind(6301)},
 		Tags:  nostr.TagMap{"i": []string{"online-relays"}},
 		Limit: 1,
 	}
 
 	// Try each storage relay
 	for _, relayURL := range storageRelays {
-		relay, err := nostr.RelayConnect(ctx, relayURL)
+		relay, err := nostr.RelayConnect(ctx, relayURL, nostr.RelayOptions{})
 		if err != nil {
 			continue
 		}
 
-		events, err := relay.QuerySync(ctx, filter)
+		var firstEvent *nostr.Event
+		for evt := range relay.QueryEvents(filter) {
+			firstEvent = &evt
+			break
+		}
 		relay.Close()
 
-		if err != nil || len(events) == 0 {
+		if firstEvent == nil {
 			continue
 		}
 
 		// Parse relay list from content (JSON array)
 		var relays []string
-		if err := json.Unmarshal([]byte(events[0].Content), &relays); err != nil {
+		if err := json.Unmarshal([]byte(firstEvent.Content), &relays); err != nil {
 			continue
 		}
 
@@ -65,28 +69,32 @@ func GetUserNIP65Relays(ctx context.Context, storageRelays []string, pubkey stri
 	defer cancel()
 
 	filter := nostr.Filter{
-		Kinds:   []int{10002},
-		Authors: []string{pubkey},
+		Kinds:   []nostr.Kind{nostr.Kind(10002)},
+		Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)},
 		Limit:   1,
 	}
 
 	// Try each storage relay
 	for _, relayURL := range storageRelays {
-		relay, err := nostr.RelayConnect(ctx, relayURL)
+		relay, err := nostr.RelayConnect(ctx, relayURL, nostr.RelayOptions{})
 		if err != nil {
 			continue
 		}
 
-		events, err := relay.QuerySync(ctx, filter)
+		var firstEvent *nostr.Event
+		for evt := range relay.QueryEvents(filter) {
+			firstEvent = &evt
+			break
+		}
 		relay.Close()
 
-		if err != nil || len(events) == 0 {
+		if firstEvent == nil {
 			continue
 		}
 
 		// Extract relay URLs from the event
 		var userRelays []string
-		for _, tag := range events[0].Tags {
+		for _, tag := range firstEvent.Tags {
 			if len(tag) >= 2 && tag[0] == "r" {
 				userRelays = append(userRelays, tag[1])
 			}
