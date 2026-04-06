@@ -49,21 +49,21 @@ func (s *Syncer) SyncUserEvents(ctx context.Context, pubkey string, userRelays [
 
 	// Filters for user's own relays
 	userFilters := []nostr.Filter{
-		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{1}},                    // Posts/replies
-		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{7}},                    // Reactions
-		{Kinds: []nostr.Kind{3}, Tags: nostr.TagMap{"p": []string{pubkey}}},    // Followers
-		{Kinds: []nostr.Kind{9735}, Tags: nostr.TagMap{"p": []string{pubkey}}}, // Zaps received
-		{Kinds: []nostr.Kind{9735}, Tags: nostr.TagMap{"P": []string{pubkey}}}, // Zaps sent (P = sender)
-		{Kinds: []nostr.Kind{9321}, Tags: nostr.TagMap{"p": []string{pubkey}}}, // Nutzaps received
-		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{9321}},                 // Nutzaps sent
+		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{1}},    // Posts/replies
+		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{7}},    // Reactions
+		{Kinds: []nostr.Kind{3}, Tags: nostr.TagMap{"p": []string{pubkey}}},                   // Followers
+		{Kinds: []nostr.Kind{9735}, Tags: nostr.TagMap{"p": []string{pubkey}}},                // Zaps received
+		{Kinds: []nostr.Kind{9735}, Tags: nostr.TagMap{"P": []string{pubkey}}},                // Zaps sent (P = sender)
+		{Kinds: []nostr.Kind{9321}, Tags: nostr.TagMap{"p": []string{pubkey}}},                // Nutzaps received
+		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{9321}}, // Nutzaps sent
 	}
 
 	// Reports should be fetched from popular relays + user relays
 	popularRelays, _ := GetPopularRelays(ctx, s.storageRelays)
 	reportRelays := MergeRelays(popularRelays, userRelays)
 	reportFilters := []nostr.Filter{
-		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{1984}},                 // Reports sent
-		{Kinds: []nostr.Kind{1984}, Tags: nostr.TagMap{"p": []string{pubkey}}}, // Reports received
+		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{1984}}, // Reports sent
+		{Kinds: []nostr.Kind{1984}, Tags: nostr.TagMap{"p": []string{pubkey}}},                // Reports received
 	}
 
 	deadline := time.Now().Add(30 * time.Second)
@@ -130,7 +130,7 @@ func (s *Syncer) SyncUserEventsAsync(ctx context.Context, pubkey string, userRel
 			userFilters = append(userFilters, nostr.Filter{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{7}})
 		}
 		if filterType&keys.FilterReposts != 0 {
-			userFilters = append(userFilters, nostr.Filter{Authors: []string{pubkey}, Kinds: []int{6}})
+			userFilters = append(userFilters, nostr.Filter{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{6}})
 		}
 		if filterType&keys.FilterFollowers != 0 {
 			userFilters = append(userFilters, nostr.Filter{Kinds: []nostr.Kind{3}, Tags: nostr.TagMap{"p": []string{pubkey}}})

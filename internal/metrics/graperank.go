@@ -168,18 +168,13 @@ func (g *GrapeRankEngine) buildGraph(ctx context.Context) (graphCache, error) {
 		allNodes[to] = struct{}{}
 	}
 
-	queryKinds := []int{1, 3, 6, 7, 1984, 9321, 9735}
+	queryKinds := []nostr.Kind{1, 3, 6, 7, 1984, 9321, 9735}
 	for _, kind := range queryKinds {
-		ch, err := g.db.QueryEvents(ctx, nostr.Filter{Kinds: []int{kind}})
-		if err != nil {
-			return graphCache{}, fmt.Errorf("query kind %d: %w", kind, err)
-		}
-
-		for event := range ch {
-			if event == nil || len(event.PubKey) != 64 {
+		for event := range g.db.QueryEvents(nostr.Filter{Kinds: []nostr.Kind{kind}}, 0) {
+			author := event.PubKey.Hex()
+			if len(author) != 64 {
 				continue
 			}
-			author := event.PubKey
 			allNodes[author] = struct{}{}
 
 			switch kind {

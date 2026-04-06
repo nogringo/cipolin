@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"iter"
 	"sync"
 	"testing"
 	"time"
@@ -15,26 +16,18 @@ type fakeEventStore struct {
 	queryCount int
 }
 
-func (f *fakeEventStore) QueryEvents(ctx context.Context, filter nostr.Filter) (chan *nostr.Event, error) {
+func (f *fakeEventStore) QueryEvents(filter nostr.Filter, _ int) iter.Seq[nostr.Event] {
 	f.mu.Lock()
 	f.queryCount++
 	f.mu.Unlock()
 
-	ch := make(chan *nostr.Event)
-	go func() {
-		defer close(ch)
+	return func(yield func(nostr.Event) bool) {
 		for _, event := range f.events {
-			if matchesFilter(event, filter) {
-				select {
-				case ch <- event:
-				case <-ctx.Done():
-					return
-				}
+			if matchesFilter(event, filter) && !yield(*event) {
+				return
 			}
 		}
-	}()
-
-	return ch, nil
+	}
 }
 
 func matchesFilter(event *nostr.Event, filter nostr.Filter) bool {
@@ -105,7 +98,7 @@ func TestGrapeRankCachesGraphAndRequesterResults(t *testing.T) {
 
 	store := &fakeEventStore{
 		events: []*nostr.Event{
-			{Kind: 3, PubKey: a, Tags: nostr.Tags{{"p", b}}},
+			{Kind: 3, PubKey: nostr.MustPubKeyFromHex(a), Tags: nostr.Tags{{"p", b}}},
 		},
 	}
 
@@ -140,7 +133,7 @@ func TestGrapeRankCacheExpiresAfterTTL(t *testing.T) {
 
 	store := &fakeEventStore{
 		events: []*nostr.Event{
-			{Kind: 3, PubKey: a, Tags: nostr.Tags{{"p", b}}},
+			{Kind: 3, PubKey: nostr.MustPubKeyFromHex(a), Tags: nostr.Tags{{"p", b}}},
 		},
 	}
 
@@ -171,10 +164,10 @@ func TestGrapeRankAppliesReportPenalty(t *testing.T) {
 
 	store := &fakeEventStore{
 		events: []*nostr.Event{
-			{Kind: 3, PubKey: a, Tags: nostr.Tags{{"p", b}, {"p", c}}},
-			{Kind: 3, PubKey: b, Tags: nostr.Tags{{"p", c}}},
-			{Kind: 3, PubKey: c, Tags: nostr.Tags{{"p", b}}},
-			{Kind: 1984, PubKey: a, Tags: nostr.Tags{{"p", b}}},
+			{Kind: 3, PubKey: nostr.MustPubKeyFromHex(a), Tags: nostr.Tags{{"p", b}, {"p", c}}},
+			{Kind: 3, PubKey: nostr.MustPubKeyFromHex(b), Tags: nostr.Tags{{"p", c}}},
+			{Kind: 3, PubKey: nostr.MustPubKeyFromHex(c), Tags: nostr.Tags{{"p", b}}},
+			{Kind: 1984, PubKey: nostr.MustPubKeyFromHex(a), Tags: nostr.Tags{{"p", b}}},
 		},
 	}
 
