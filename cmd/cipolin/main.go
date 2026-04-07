@@ -14,6 +14,7 @@ import (
 	"cipolin/internal/fetcher"
 	"cipolin/internal/handler"
 	"cipolin/internal/keys"
+	"cipolin/internal/metrics"
 	"cipolin/internal/relay"
 
 	"fiatjaf.com/nostr"
@@ -32,14 +33,24 @@ type Config struct {
 	FetchTTL      time.Duration
 	FetchTimeout  time.Duration
 	RelayURL      string // Public relay URL for kind 10040 tags
+	Neo4jURI      string
+	Neo4jUsername string
+	Neo4jPassword string
+	Neo4jDatabase string
+	RankCacheTTL  time.Duration
+	Neo4jTimeout  time.Duration
 }
 
 func loadConfig() Config {
 	cfg := Config{
-		MasterKey: os.Getenv("NIP85_MASTER_KEY"),
-		Port:      os.Getenv("PORT"),
-		DBPath:    os.Getenv("DB_PATH"),
-		RelayURL:  os.Getenv("RELAY_URL"),
+		MasterKey:     os.Getenv("NIP85_MASTER_KEY"),
+		Port:          os.Getenv("PORT"),
+		DBPath:        os.Getenv("DB_PATH"),
+		RelayURL:      os.Getenv("RELAY_URL"),
+		Neo4jURI:      os.Getenv("NEO4J_URI"),
+		Neo4jUsername: os.Getenv("NEO4J_USERNAME"),
+		Neo4jPassword: os.Getenv("NEO4J_PASSWORD"),
+		Neo4jDatabase: os.Getenv("NEO4J_DATABASE"),
 	}
 
 	// Fallback to old env var name for backwards compatibility
@@ -75,6 +86,34 @@ func loadConfig() Config {
 	}
 	if cfg.FetchTimeout == 0 {
 		cfg.FetchTimeout = fetcher.DefaultFetchTimeout
+	}
+
+	if cfg.Neo4jURI == "" {
+		cfg.Neo4jURI = "neo4j://localhost:7687"
+	}
+	if cfg.Neo4jUsername == "" {
+		cfg.Neo4jUsername = "neo4j"
+	}
+	if cfg.Neo4jDatabase == "" {
+		cfg.Neo4jDatabase = "neo4j"
+	}
+
+	if ttlStr := os.Getenv("RANK_CACHE_TTL_SECONDS"); ttlStr != "" {
+		if ttl, err := strconv.Atoi(ttlStr); err == nil {
+			cfg.RankCacheTTL = time.Duration(ttl) * time.Second
+		}
+	}
+	if cfg.RankCacheTTL == 0 {
+		cfg.RankCacheTTL = 15 * time.Second
+	}
+
+	if timeoutStr := os.Getenv("NEO4J_QUERY_TIMEOUT_SECONDS"); timeoutStr != "" {
+		if timeout, err := strconv.Atoi(timeoutStr); err == nil {
+			cfg.Neo4jTimeout = time.Duration(timeout) * time.Second
+		}
+	}
+	if cfg.Neo4jTimeout == 0 {
+		cfg.Neo4jTimeout = 20 * time.Second
 	}
 
 	// Parse storage relays
@@ -148,8 +187,25 @@ func main() {
 	log.Printf("Event fetcher initialized (TTL: %v, Timeout: %v)", config.FetchTTL, config.FetchTimeout)
 
 	// Initialize syncer and handler
-	syncer := relay.NewSyncer(eventFetcher, db, config.StorageRelays)
-	h := handler.NewHandler(syncer, db, config.StorageRelays, keyManager)
+	if config.Neo4jPassword == "" {
+		log.Fatalf("NEO4J_PASSWORD must be set in environment/.env")
+	}
+
+	graphRank, err := metrics.NewGraphRankEngine(context.Background(), metrics.GraphRankEngineConfig{
+		URI:          config.Neo4jURI,
+		Username:     config.Neo4jUsername,
+		Password:     config.Neo4jPassword,
+		Database:     config.Neo4jDatabase,
+		CacheTTL:     config.RankCacheTTL,
+		QueryTimeout: config.Neo4jTimeout,
+	})
+	if err != nil {
+		log.Fatalf("Failed to initialize Neo4j rank engine: %v", err)
+	}
+	defer graphRank.Close(context.Background())
+
+	syncer := relay.NewSyncer(eventFetcher, db, config.StorageRelays, graphRank, graphRank)
+	h := handler.NewHandler(syncer, db, config.StorageRelays, keyManager, graphRank)
 
 	// Create relay
 	r := khatru.NewRelay()
@@ -199,7 +255,7 @@ func main() {
 
 	// Setup HTTP routes using the relay's router
 	mux := http.NewServeMux()
-	
+
 	// Delegate to khatru's built-in HTTP handler (WebSocket support)
 	mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
 		// Let Khatru handle WebSocket upgrades
@@ -243,6 +299,7 @@ func main() {
 	log.Printf("Starting NIP-85 relay on :%s", config.Port)
 	log.Printf("Public relay URL: %s", config.RelayURL)
 	log.Printf("Storage relays: %v", config.StorageRelays)
+	log.Printf("Neo4j: %s (db=%s, rank cache ttl=%v)", config.Neo4jURI, config.Neo4jDatabase, config.RankCacheTTL)
 	log.Printf("Endpoints: / (relay), /keys (metric pubkeys)")
 
 	if err := http.ListenAndServe(":"+config.Port, r); err != nil {

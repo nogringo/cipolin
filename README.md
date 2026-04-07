@@ -15,8 +15,10 @@ Cipolin is a Nostr relay that generates on-demand metrics assertions:
 When a client queries for these kinds with a `d` tag, Cipolin:
 1. Fetches relevant events from the user's relays and popular relays
 2. Stores them locally for metric computation
-3. Computes metrics from the local database
+3. Ingests follow edges into Neo4j and computes user rank via PageRank
 4. Signs and returns a NIP-85 assertion event
+
+User rank keeps the existing progressive stream behavior: initial cached values are emitted first, then updated ranks are streamed as newly fetched follow data is ingested.
 
 ## Features
 
@@ -80,6 +82,16 @@ FETCH_TTL_SECONDS=60
 
 # Fetch timeout - timeout per relay connection (seconds)
 FETCH_TIMEOUT_SECONDS=10
+
+# Neo4j settings for PageRank user ranking
+NEO4J_URI=neo4j://localhost:7687
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=your_password
+NEO4J_DATABASE=neo4j
+
+# Rank cache TTL and Neo4j query timeout (seconds)
+RANK_CACHE_TTL_SECONDS=15
+NEO4J_QUERY_TIMEOUT_SECONDS=20
 ```
 
 ## Usage
@@ -113,7 +125,7 @@ nak req -k 30384 -d <kind:pubkey:d-tag> ws://localhost:3334
 | Tag | Description |
 |-----|-------------|
 | `followers` | Number of followers |
-| `rank` | Normalized rank (0-100) |
+| `rank` | Neo4j GDS PageRank over follow graph, normalized to 0-100 |
 | `first_created_at` | Timestamp of first known event |
 | `post_cnt` | Number of posts |
 | `reply_cnt` | Number of replies |

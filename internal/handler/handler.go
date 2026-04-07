@@ -31,15 +31,17 @@ type Handler struct {
 	db            metrics.EventStore
 	storageRelays []string
 	keyManager    *keys.MetricKeyManager
+	rankProvider  metrics.UserRankProvider
 }
 
 // NewHandler creates a new NIP-85 handler
-func NewHandler(syncer *relay.Syncer, db metrics.EventStore, storageRelays []string, keyManager *keys.MetricKeyManager) *Handler {
+func NewHandler(syncer *relay.Syncer, db metrics.EventStore, storageRelays []string, keyManager *keys.MetricKeyManager, rankProvider metrics.UserRankProvider) *Handler {
 	return &Handler{
 		syncer:        syncer,
 		db:            db,
 		storageRelays: storageRelays,
 		keyManager:    keyManager,
+		rankProvider:  rankProvider,
 	}
 }
 
@@ -228,7 +230,7 @@ func (h *Handler) sendUserMetrics(ctx context.Context, pubkey string, requestedA
 	pTag := nostr.Tag{"p", pubkey}
 
 	// Always compute from local DB (returns 0s if no data)
-	m := metrics.ComputeUserMetrics(h.db, pubkey)
+	m := metrics.ComputeUserMetrics(ctx, h.db, pubkey, h.rankProvider)
 
 	metricNames := []string{
 		"followers", "rank", "first_created_at",
@@ -308,7 +310,7 @@ func (h *Handler) generateUserAssertions(ctx context.Context, pubkey string, req
 	log.Printf("[handler] Computing metrics for %s...", pubkey[:16]+"...")
 
 	// Compute metrics from local DB
-	m := metrics.ComputeUserMetrics(h.db, pubkey)
+	m := metrics.ComputeUserMetrics(ctx, h.db, pubkey, h.rankProvider)
 
 	log.Printf("[handler] Metrics computed for %s, building events...", pubkey[:16]+"...")
 

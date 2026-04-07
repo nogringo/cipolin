@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"context"
 	"encoding/json"
 	"iter"
 	"math"
@@ -63,7 +64,7 @@ func extractAmountFromNutzap(event nostr.Event) int64 {
 }
 
 // ComputeUserMetrics computes kind 30382 metrics for a pubkey from local DB
-func ComputeUserMetrics(db EventStore, pubkey string) map[string]string {
+func ComputeUserMetrics(ctx context.Context, db EventStore, pubkey string, rankProvider UserRankProvider) map[string]string {
 	metrics := make(map[string]string)
 
 	var (
@@ -266,6 +267,11 @@ func ComputeUserMetrics(db EventStore, pubkey string) map[string]string {
 
 	// Calculate rank
 	rank := CalculateUserRank(followerCount, postCount, zapAmountRecd, zapCountRecd)
+	if rankProvider != nil {
+		if graphRank, err := rankProvider.GetUserRank(ctx, pubkey); err == nil {
+			rank = graphRank
+		}
+	}
 
 	// Build metrics map
 	metrics["followers"] = strconv.Itoa(followerCount)
