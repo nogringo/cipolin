@@ -223,6 +223,9 @@ func (h *Handler) streamUserAssertions(ctx context.Context, pubkey, requesterPub
 		case <-progress.Done:
 			// Final update
 			log.Printf("[handler] Sync complete for %s, sending final metrics", pubkey[:16]+"...")
+			if h.rankEngine != nil {
+				h.rankEngine.InvalidateCache()
+			}
 			h.sendUserMetrics(ctx, pubkey, requesterPubkey, requestedAuthors, yield, true)
 			return
 
@@ -232,6 +235,9 @@ func (h *Handler) streamUserAssertions(ctx context.Context, pubkey, requesterPub
 			if currentCount > lastEventCount {
 				log.Printf("[handler] Progress update for %s: %d events (was %d)", pubkey[:16]+"...", currentCount, lastEventCount)
 				lastEventCount = currentCount
+				if h.rankEngine != nil {
+					h.rankEngine.InvalidateCache()
+				}
 				h.sendUserMetrics(ctx, pubkey, requesterPubkey, requestedAuthors, yield, false)
 			}
 		}
@@ -243,9 +249,29 @@ func (h *Handler) streamUserAssertions(ctx context.Context, pubkey, requesterPub
 func (h *Handler) sendUserMetrics(ctx context.Context, pubkey, requesterPubkey string, requestedAuthors map[string]bool, yield func(nostr.Event) bool, isFinal bool) {
 	pTag := nostr.Tag{"p", pubkey}
 
-	// Always compute from local DB (returns 0s if no data)
-	m := metrics.ComputeUserMetrics(h.db, pubkey)
-	if h.rankEngine != nil && requesterPubkey != "" {
+	m := map[string]string{"rank": "0"}
+
+	needsUserMetrics := len(requestedAuthors) == 0
+	if !needsUserMetrics {
+		for _, name := range []string{
+			"followers", "first_created_at", "post_cnt", "reply_cnt", "reactions_cnt",
+			"zap_amt_recd", "zap_amt_sent", "zap_cnt_recd", "zap_cnt_sent",
+			"zap_avg_amt_day_recd", "zap_avg_amt_day_sent",
+			"reports_cnt_recd", "reports_cnt_sent",
+			"active_hours_start", "active_hours_end", "t",
+		} {
+			if h.shouldGenerateMetric(name, requestedAuthors) {
+				needsUserMetrics = true
+				break
+			}
+		}
+	}
+
+	if needsUserMetrics {
+		m = metrics.ComputeUserMetrics(h.db, pubkey)
+	}
+
+	if h.rankEngine != nil && requesterPubkey != "" && h.shouldGenerateMetric("rank", requestedAuthors) {
 		if rank, ok := h.rankEngine.GetRank(ctx, requesterPubkey, pubkey); ok {
 			m["rank"] = strconv.Itoa(rank)
 		}
@@ -324,6 +350,9 @@ func (h *Handler) generateUserAssertions(ctx context.Context, pubkey, requesterP
 	// Sync events for this user
 	if err := h.syncer.SyncUserEvents(ctx, pubkey, userRelays); err != nil {
 		log.Printf("[handler] Sync failed: %v", err)
+	}
+	if h.rankEngine != nil {
+		h.rankEngine.InvalidateCache()
 	}
 
 	log.Printf("[handler] Computing metrics for %s...", pubkey[:16]+"...")

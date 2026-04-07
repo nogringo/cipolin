@@ -398,6 +398,8 @@ func logFetchResults(label string, results []fetcher.ContinuousFetchSummary) {
 		total += r.Total
 		if r.Error != nil {
 			errors++
+			log.Printf("[sync] %s: relay=%s filter=%+v error=%v total=%d reachedEnd=%v timedOut=%v skippedTTL=%v",
+				label, r.Relay, r.Filter, r.Error, r.Total, r.ReachedEnd, r.TimedOut, r.SkippedTTL)
 		}
 		if r.SkippedTTL {
 			skipped++

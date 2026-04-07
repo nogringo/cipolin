@@ -59,7 +59,7 @@ func GetPopularRelays(ctx context.Context, storageRelays []string) ([]string, er
 	return []string{
 		"wss://relay.damus.io",
 		"wss://nos.lol",
-		"wss://relay.nostr.band",
+		"wss://relay.camelus.app",
 	}, nil
 }
 
@@ -109,7 +109,7 @@ func GetUserNIP65Relays(ctx context.Context, storageRelays []string, pubkey stri
 	return []string{
 		"wss://relay.damus.io",
 		"wss://nos.lol",
-		"wss://relay.nostr.band",
+		"wss://relay.camelus.app",
 		"wss://nostr.wine",
 		"wss://relay.primal.net",
 	}, nil

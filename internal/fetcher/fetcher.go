@@ -122,7 +122,8 @@ func (f *EventFetcher) fetchBackward(
 	}
 
 	// Query events
-	var events []nostr.Event
+	log.Printf("[fetcher] Querying relay %s with filter %+v", relayURL, queryFilter)
+	events := make([]nostr.Event, 0)
 	for event := range relay.QueryEvents(queryFilter) {
 		events = append(events, event)
 	}
@@ -247,7 +248,8 @@ func (f *EventFetcher) fetchForward(
 		Limit:   f.config.FetchLimit,
 	}
 
-	var events []nostr.Event
+	log.Printf("[fetcher] Querying relay %s with filter %+v", relayURL, queryFilter)
+	events := make([]nostr.Event, 0)
 	for event := range relay.QueryEvents(queryFilter) {
 		events = append(events, event)
 	}

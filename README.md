@@ -126,6 +126,17 @@ Query personalized user rank (requester-aware):
 nak req -k 30382 -d <target_pubkey> -t r=<requester_pubkey> ws://localhost:3334
 ```
 
+```bash
+nak req -k 30382 -a <rank_metric_pubkey> -d <target_pubkey> -t r=<requester_pubkey> ws://localhost:3334
+```
+
+nak req -k 30382 -a cbeb151f3f5c4925c392c2b79936c3acd3c5c73a8ad60173ee6e43ff9112cfe1 -d 46fcbe3065eaf1ae7811465924e48923363ff3f526bd6f73d7c184b16bd8ce4d -t r=717ff238f888273f5d5ee477097f2b398921503769303a0c518d06a952f2a75e -a=819a514c6fa393582f7476f87914a7de59bfe52b82bba81bd2fe30974ab6b578 ws://localhost:3334 --stream
+
+# test
+nak req -k 30382 -a cbeb151f3f5c4925c392c2b79936c3acd3c5c73a8ad60173ee6e43ff9112cfe1 -d 32e1827635450ebb3c5a7d12c1f8e7b2b514439ac10a67eef3d9fd9c5c68e245 -t r=717ff238f888273f5d5ee477097f2b398921503769303a0c518d06a952f2a75e ws://localhost:3334 --stream
+
+819a514c6fa393582f7476f87914a7de59bfe52b82bba81bd2fe30974ab6b578
+
 If your `nak` build does not support `-t`, send the equivalent raw Nostr `REQ`:
 
 ```json
@@ -150,6 +161,48 @@ Equivalent raw `REQ`:
 
 ```json
 ["REQ","rank-only",{"kinds":[30382],"authors":["<rank_metric_pubkey>"],"#d":["<target_pubkey>"],"#r":["<requester_pubkey>"]}]
+```
+
+Fetch the current personalized GrapeRank over HTTP:
+
+```bash
+curl -s "http://localhost:3334/rank?requester=<requester_pubkey>&target=<target_pubkey>"
+```
+
+By default the endpoint does a fresh sync for the requester and target before scoring. To use cached data only:
+
+```bash
+curl -s "http://localhost:3334/rank?requester=<requester_pubkey>&target=<target_pubkey>&refresh=false"
+```
+
+Example response:
+
+```json
+{
+	"requester": "<requester_pubkey>",
+	"target": "<target_pubkey>",
+	"rank": 73,
+	"refresh": true
+}
+```
+
+Fetch ranks for multiple targets in one request:
+
+```bash
+curl -s "http://localhost:3334/rank/batch?requester=<requester_pubkey>&target=<target_one>,<target_two>"
+```
+
+Example batch response:
+
+```json
+{
+	"requester": "<requester_pubkey>",
+	"refresh": true,
+	"results": [
+		{"pubkey": "<target_one>", "rank": 73},
+		{"pubkey": "<target_two>", "rank": 41}
+	]
+}
 ```
 
 Query event metrics:
