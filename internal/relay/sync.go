@@ -27,19 +27,51 @@ type EventStore interface {
 	SaveEvent(event nostr.Event) error
 }
 
+type GraphIngestor interface {
+	IngestEvent(ctx context.Context, event nostr.Event) (bool, error)
+}
+
+type RankCacheInvalidator interface {
+	InvalidateCache()
+}
+
 // Syncer handles event synchronization
 type Syncer struct {
 	fetcher       *fetcher.EventFetcher
 	db            EventStore
 	storageRelays []string
+	graphIngestor GraphIngestor
+	rankCache     RankCacheInvalidator
 }
 
 // NewSyncer creates a new event syncer
-func NewSyncer(f *fetcher.EventFetcher, db EventStore, storageRelays []string) *Syncer {
+func NewSyncer(f *fetcher.EventFetcher, db EventStore, storageRelays []string, graphIngestor GraphIngestor, rankCache RankCacheInvalidator) *Syncer {
 	return &Syncer{
 		fetcher:       f,
 		db:            db,
 		storageRelays: storageRelays,
+		graphIngestor: graphIngestor,
+		rankCache:     rankCache,
+	}
+}
+
+func (s *Syncer) persistEvent(ctx context.Context, event nostr.Event) {
+	if err := s.db.SaveEvent(event); err != nil {
+		log.Printf("[sync] Failed to store event: %v", err)
+		return
+	}
+
+	if s.graphIngestor == nil {
+		return
+	}
+
+	applied, err := s.graphIngestor.IngestEvent(ctx, event)
+	if err != nil {
+		log.Printf("[sync] Failed to ingest graph event: %v", err)
+		return
+	}
+	if applied && s.rankCache != nil {
+		s.rankCache.InvalidateCache()
 	}
 }
 
@@ -49,21 +81,21 @@ func (s *Syncer) SyncUserEvents(ctx context.Context, pubkey string, userRelays [
 
 	// Filters for user's own relays
 	userFilters := []nostr.Filter{
-		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{1}},                    // Posts/replies
-		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{7}},                    // Reactions
-		{Kinds: []nostr.Kind{3}, Tags: nostr.TagMap{"p": []string{pubkey}}},    // Followers
-		{Kinds: []nostr.Kind{9735}, Tags: nostr.TagMap{"p": []string{pubkey}}}, // Zaps received
-		{Kinds: []nostr.Kind{9735}, Tags: nostr.TagMap{"P": []string{pubkey}}}, // Zaps sent (P = sender)
-		{Kinds: []nostr.Kind{9321}, Tags: nostr.TagMap{"p": []string{pubkey}}}, // Nutzaps received
-		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{9321}},                 // Nutzaps sent
+		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{1}},    // Posts/replies
+		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{7}},    // Reactions
+		{Kinds: []nostr.Kind{3}, Tags: nostr.TagMap{"p": []string{pubkey}}},                   // Followers
+		{Kinds: []nostr.Kind{9735}, Tags: nostr.TagMap{"p": []string{pubkey}}},                // Zaps received
+		{Kinds: []nostr.Kind{9735}, Tags: nostr.TagMap{"P": []string{pubkey}}},                // Zaps sent (P = sender)
+		{Kinds: []nostr.Kind{9321}, Tags: nostr.TagMap{"p": []string{pubkey}}},                // Nutzaps received
+		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{9321}}, // Nutzaps sent
 	}
 
 	// Reports should be fetched from popular relays + user relays
 	popularRelays, _ := GetPopularRelays(ctx, s.storageRelays)
 	reportRelays := MergeRelays(popularRelays, userRelays)
 	reportFilters := []nostr.Filter{
-		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{1984}},                 // Reports sent
-		{Kinds: []nostr.Kind{1984}, Tags: nostr.TagMap{"p": []string{pubkey}}}, // Reports received
+		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{1984}}, // Reports sent
+		{Kinds: []nostr.Kind{1984}, Tags: nostr.TagMap{"p": []string{pubkey}}},                // Reports received
 	}
 
 	deadline := time.Now().Add(30 * time.Second)
@@ -73,9 +105,7 @@ func (s *Syncer) SyncUserEvents(ctx context.Context, pubkey string, userRelays [
 	onEvent := func(event nostr.Event) {
 		storeMu.Lock()
 		defer storeMu.Unlock()
-		if err := s.db.SaveEvent(event); err != nil {
-			log.Printf("[sync] Failed to store event: %v", err)
-		}
+		s.persistEvent(ctx, event)
 	}
 
 	// Fetch in parallel
@@ -157,9 +187,7 @@ func (s *Syncer) SyncUserEventsAsync(ctx context.Context, pubkey string, userRel
 			}
 			storeMu.Lock()
 			defer storeMu.Unlock()
-			if err := s.db.SaveEvent(event); err != nil {
-				log.Printf("[sync-async] Failed to store event: %v", err)
-			}
+			s.persistEvent(ctx, event)
 			atomic.AddInt64(&progress.EventCount, 1)
 		}
 
@@ -249,9 +277,7 @@ func (s *Syncer) SyncEventInteractionsAsync(ctx context.Context, eventID string)
 			if ctx.Err() != nil {
 				return
 			}
-			if err := s.db.SaveEvent(event); err != nil {
-				log.Printf("[sync-async] Failed to store event: %v", err)
-			}
+			s.persistEvent(ctx, event)
 			atomic.AddInt64(&progress.EventCount, 1)
 		}
 
@@ -302,9 +328,7 @@ func (s *Syncer) SyncAddressInteractionsAsync(ctx context.Context, address strin
 			if ctx.Err() != nil {
 				return
 			}
-			if err := s.db.SaveEvent(event); err != nil {
-				log.Printf("[sync-async] Failed to store event: %v", err)
-			}
+			s.persistEvent(ctx, event)
 			atomic.AddInt64(&progress.EventCount, 1)
 		}
 
@@ -343,9 +367,7 @@ func (s *Syncer) SyncEventInteractions(ctx context.Context, eventID string) erro
 	deadline := time.Now().Add(30 * time.Second)
 
 	onEvent := func(event nostr.Event) {
-		if err := s.db.SaveEvent(event); err != nil {
-			log.Printf("[sync] Failed to store event: %v", err)
-		}
+		s.persistEvent(ctx, event)
 	}
 
 	results := s.fetcher.FetchAllContinuously(ctx, relays, filters, fetcher.FetchBackward, deadline, onEvent)
@@ -375,9 +397,7 @@ func (s *Syncer) SyncAddressInteractions(ctx context.Context, address string) er
 	deadline := time.Now().Add(30 * time.Second)
 
 	onEvent := func(event nostr.Event) {
-		if err := s.db.SaveEvent(event); err != nil {
-			log.Printf("[sync] Failed to store event: %v", err)
-		}
+		s.persistEvent(ctx, event)
 	}
 
 	results := s.fetcher.FetchAllContinuously(ctx, relays, filters, fetcher.FetchBackward, deadline, onEvent)

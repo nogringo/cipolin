@@ -5,6 +5,7 @@ go 1.25
 require (
 	fiatjaf.com/nostr v0.0.0-20260403153006-371cecdb8498
 	github.com/joho/godotenv v1.5.1
+	github.com/neo4j/neo4j-go-driver/v5 v5.28.4
 	go.etcd.io/bbolt v1.4.2
 )
 
