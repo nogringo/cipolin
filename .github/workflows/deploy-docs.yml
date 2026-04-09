@@ -1,30 +1,23 @@
-name: deploy docs to GitHub Pages
+name: Publish Retype powered website to GitHub Pages
 on:
-  push:
-    tags:
-      - "v*" # Push events to matching v*, i.e. v1.0, v20.15.10
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
   publish:
-    name: Publish to gh-pages branch
-
     runs-on: ubuntu-latest
-
     permissions:
       contents: write
 
     steps:
-      - uses: actions/checkout@v2
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v3
+      - uses: actions/checkout@v4
         with:
-          dotnet-version: "7.0.x"
+          fetch-depth: 0
 
       - uses: retypeapp/action-build@latest
 
       - uses: retypeapp/action-github-pages@latest
         with:
           update-branch: true
-          branch: gh-pages
