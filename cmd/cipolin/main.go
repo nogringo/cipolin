@@ -211,7 +211,7 @@ func main() {
 	r := khatru.NewRelay()
 	r.Info.Name = "NIP-85 Trusted Assertions Provider"
 	r.Info.Description = "On-demand computation of user and event metrics with per-metric signing keys"
-	pubKey := nostr.MustPubKeyFromHex(keyManager.GetPubKey("rank"))
+	pubKey := nostr.MustPubKeyFromHex(keyManager.GetPubKey("30382", "rank"))
 	r.Info.PubKey = &pubKey // Use rank pubkey as relay identity
 	r.Info.SupportedNIPs = []any{11, 85}
 
