@@ -46,14 +46,17 @@ func NewHandler(syncer *relay.Syncer, db metrics.EventStore, storageRelays []str
 // HandleNIP85QueryQueryStored intercepts queries for NIP-85 kinds and generates assertions on-demand with lazy loading
 func (h *Handler) HandleNIP85QueryQueryStored(ctx context.Context, filter nostr.Filter) iter.Seq[nostr.Event] {
 	return func(yield func(nostr.Event) bool) {
+		log.Printf("[handler] HandleNIP85QueryQueryStored called: kinds=%v authors=%v tags.d=%v", filter.Kinds, filter.Authors, filter.Tags["d"])
 		// Only handle NIP-85 kinds
 		if !containsNIP85Kind(filter.Kinds) {
+			log.Printf("[handler] Skipping NIP-85 handler because filter does not contain NIP-85 kinds")
 			return
 		}
 
 		// Get the subject from d tag
 		dTags := filter.Tags["d"]
 		if len(dTags) == 0 {
+			log.Printf("[handler] Skipping NIP-85 handler because filter has no d tag")
 			return
 		}
 
@@ -62,9 +65,11 @@ func (h *Handler) HandleNIP85QueryQueryStored(ctx context.Context, filter nostr.
 		for _, author := range filter.Authors {
 			requestedAuthors[author.Hex()] = true
 		}
+		log.Printf("[handler] Requested author pubkeys: %v", requestedAuthors)
 
 		for _, kind := range filter.Kinds {
 			for _, subject := range dTags {
+				log.Printf("[handler] Processing NIP-85 kind=%d subject=%s", kind, truncateSubject(subject))
 				switch kind {
 				case KindUserAssertion:
 					// Use streaming/lazy loading for user assertions
@@ -151,12 +156,15 @@ func (h *Handler) shouldGenerateMetric(metric string, requestedAuthors map[strin
 	}
 	// Check if this metric's pubkey is in the requested authors
 	metricPubkey := h.keyManager.GetPubKey(metric)
-	return requestedAuthors[metricPubkey]
+	allowed := requestedAuthors[metricPubkey]
+	log.Printf("[handler] shouldGenerateMetric metric=%s pubkey=%s allowed=%t", metric, metricPubkey, allowed)
+	return allowed
 }
 
 // getRequestedMetrics returns the list of metric names being requested based on author filter
 func (h *Handler) getRequestedMetrics(requestedAuthors map[string]bool) []string {
 	if len(requestedAuthors) == 0 {
+		log.Printf("[handler] No author filter present; all metrics will be generated")
 		return nil // nil means all metrics
 	}
 
@@ -166,12 +174,14 @@ func (h *Handler) getRequestedMetrics(requestedAuthors map[string]bool) []string
 			metrics = append(metrics, metric)
 		}
 	}
+	log.Printf("[handler] Requested metrics after author filter: %v", metrics)
 	return metrics
 }
 
 // streamUserAssertions streams user assertions with lazy loading
 func (h *Handler) streamUserAssertions(ctx context.Context, pubkey string, requestedAuthors map[string]bool, yield func(nostr.Event) bool) {
 	if len(pubkey) != 64 {
+		log.Printf("[handler] Invalid user subject length %d for pubkey=%s", len(pubkey), truncateSubject(pubkey))
 		return
 	}
 
@@ -225,10 +235,12 @@ func (h *Handler) streamUserAssertions(ctx context.Context, pubkey string, reque
 // sendUserMetrics computes and sends user metric events
 // isFinal indicates this is the last update (publish to storage relays)
 func (h *Handler) sendUserMetrics(ctx context.Context, pubkey string, requestedAuthors map[string]bool, yield func(nostr.Event) bool, isFinal bool) {
+	log.Printf("[handler] sendUserMetrics start pubkey=%s requestedAuthors=%v isFinal=%t", truncateSubject(pubkey), requestedAuthors, isFinal)
 	pTag := nostr.Tag{"p", pubkey}
 
 	// Always compute from local DB (returns 0s if no data)
 	m := metrics.ComputeUserMetrics(h.db, pubkey)
+	log.Printf("[handler] Computed user metrics for %s: %v", truncateSubject(pubkey), m)
 
 	metricNames := []string{
 		"followers", "rank", "first_created_at",
@@ -249,14 +261,17 @@ func (h *Handler) sendUserMetrics(ctx context.Context, pubkey string, requestedA
 			log.Printf("[handler] Failed to create %s event: %v", name, err)
 			continue
 		}
+		log.Printf("[handler] Created user metric event=%s metric=%s pubkey=%s", event.ID.String()[:16]+"...", name, truncateSubject(pubkey))
 
 		// Only publish to storage relays on final update
 		if isFinal {
 			h.publishToStorageRelays(event)
 		}
 		if !yield(event) {
+			log.Printf("[handler] yield returned false after sending user metric=%s pubkey=%s", name, truncateSubject(pubkey))
 			return
 		}
+		log.Printf("[handler] yield succeeded for user metric=%s pubkey=%s", name, truncateSubject(pubkey))
 	}
 
 	// Handle topics
@@ -383,6 +398,7 @@ func (h *Handler) generateUserAssertions(ctx context.Context, pubkey string, req
 // streamEventAssertions streams event assertions with lazy loading
 func (h *Handler) streamEventAssertions(ctx context.Context, eventID string, requestedAuthors map[string]bool, yield func(nostr.Event) bool) {
 	if len(eventID) != 64 {
+		log.Printf("[handler] Invalid event subject length %d for id=%s", len(eventID), truncateSubject(eventID))
 		return
 	}
 
@@ -419,8 +435,10 @@ func (h *Handler) streamEventAssertions(ctx context.Context, eventID string, req
 
 // sendEventMetrics computes and sends event metric events
 func (h *Handler) sendEventMetrics(ctx context.Context, eventID string, requestedAuthors map[string]bool, yield func(nostr.Event) bool, isFinal bool) {
+	log.Printf("[handler] sendEventMetrics start eventID=%s requestedAuthors=%v isFinal=%t", eventID[:16]+"...", requestedAuthors, isFinal)
 	eTag := nostr.Tag{"e", eventID}
 	m := metrics.ComputeEventMetrics(h.db, eventID)
+	log.Printf("[handler] Computed event metrics for %s: %v", eventID[:16]+"...", m)
 
 	metricNames := []string{"comment_cnt", "quote_cnt", "repost_cnt", "reaction_cnt", "zap_cnt", "zap_amount", "rank"}
 
@@ -431,6 +449,7 @@ func (h *Handler) sendEventMetrics(ctx context.Context, eventID string, requeste
 
 		event, err := h.createMetricEvent(KindEventAssertion, eventID, name, m[name], eTag)
 		if err != nil {
+			log.Printf("[handler] Failed to create %s event for eventID=%s: %v", name, eventID[:16]+"...", err)
 			continue
 		}
 
@@ -438,6 +457,7 @@ func (h *Handler) sendEventMetrics(ctx context.Context, eventID string, requeste
 			h.publishToStorageRelays(event)
 		}
 		if !yield(event) {
+			log.Printf("[handler] yield returned false after sending event metric=%s eventID=%s", name, eventID[:16]+"...")
 			return
 		}
 	}
@@ -445,6 +465,10 @@ func (h *Handler) sendEventMetrics(ctx context.Context, eventID string, requeste
 
 // streamAddressAssertions streams address assertions with lazy loading
 func (h *Handler) streamAddressAssertions(ctx context.Context, address string, requestedAuthors map[string]bool, yield func(nostr.Event) bool) {
+	if address == "" {
+		log.Printf("[handler] Invalid empty address subject")
+		return
+	}
 	log.Printf("[handler] Starting lazy load for address %s", address)
 
 	// Send initial metrics from local DB
@@ -478,8 +502,10 @@ func (h *Handler) streamAddressAssertions(ctx context.Context, address string, r
 
 // sendAddressMetrics computes and sends address metric events
 func (h *Handler) sendAddressMetrics(ctx context.Context, address string, requestedAuthors map[string]bool, yield func(nostr.Event) bool, isFinal bool) {
+	log.Printf("[handler] sendAddressMetrics start address=%s requestedAuthors=%v isFinal=%t", address, requestedAuthors, isFinal)
 	aTag := nostr.Tag{"a", address}
 	m := metrics.ComputeAddressMetrics(h.db, address)
+	log.Printf("[handler] Computed address metrics for %s: %v", address, m)
 
 	metricNames := []string{"comment_cnt", "quote_cnt", "repost_cnt", "reaction_cnt", "zap_cnt", "zap_amount", "rank"}
 
@@ -490,6 +516,7 @@ func (h *Handler) sendAddressMetrics(ctx context.Context, address string, reques
 
 		event, err := h.createMetricEvent(KindAddressAssertion, address, name, m[name], aTag)
 		if err != nil {
+			log.Printf("[handler] Failed to create %s event for address=%s: %v", name, address, err)
 			continue
 		}
 
@@ -497,6 +524,7 @@ func (h *Handler) sendAddressMetrics(ctx context.Context, address string, reques
 			h.publishToStorageRelays(event)
 		}
 		if !yield(event) {
+			log.Printf("[handler] yield returned false after sending address metric=%s address=%s", name, address)
 			return
 		}
 	}
