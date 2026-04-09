@@ -25,6 +25,13 @@ const (
 	KindAddressAssertion = 30384
 )
 
+// NIP-85 event kinds as strings (for key derivation)
+const (
+	KindUserAssertionStr    = "30382"
+	KindEventAssertionStr   = "30383"
+	KindAddressAssertionStr = "30384"
+)
+
 // Handler handles NIP-85 assertion requests
 type Handler struct {
 	syncer        *relay.Syncer
@@ -126,7 +133,7 @@ func containsNIP85Kind(kinds []nostr.Kind) bool {
 }
 
 // createMetricEvent creates and signs an event for a single metric
-func (h *Handler) createMetricEvent(kind int, subject string, metric string, value string, extraTags ...nostr.Tag) (nostr.Event, error) {
+func (h *Handler) createMetricEvent(kind int, subject string, kindStr string, metric string, value string, extraTags ...nostr.Tag) (nostr.Event, error) {
 	event := nostr.Event{
 		Kind:      nostr.Kind(kind),
 		CreatedAt: nostr.Timestamp(time.Now().Unix()),
@@ -143,7 +150,7 @@ func (h *Handler) createMetricEvent(kind int, subject string, metric string, val
 	}
 
 	// Sign with metric-specific key
-	if err := h.keyManager.SignEventForMetric(&event, metric); err != nil {
+	if err := h.keyManager.SignEventForMetric(&event, kindStr, metric); err != nil {
 		return nostr.Event{}, err
 	}
 
@@ -151,28 +158,32 @@ func (h *Handler) createMetricEvent(kind int, subject string, metric string, val
 }
 
 // shouldGenerateMetric checks if a metric should be generated based on author filter
-func (h *Handler) shouldGenerateMetric(metric string, requestedAuthors map[string]bool) bool {
+func (h *Handler) shouldGenerateMetric(kind string, metric string, requestedAuthors map[string]bool) bool {
 	// If no author filter, generate all metrics
 	if len(requestedAuthors) == 0 {
 		return true
 	}
 	// Check if this metric's pubkey is in the requested authors
-	metricPubkey := h.keyManager.GetPubKey(metric)
+	metricPubkey := h.keyManager.GetPubKey(kind, metric)
 	allowed := requestedAuthors[metricPubkey]
-	log.Printf("[handler] shouldGenerateMetric metric=%s pubkey=%s allowed=%t", metric, metricPubkey, allowed)
+	log.Printf("[handler] shouldGenerateMetric kind=%s metric=%s pubkey=%s allowed=%t", kind, metric, metricPubkey, allowed)
 	return allowed
 }
 
 // getRequestedMetrics returns the list of metric names being requested based on author filter
-func (h *Handler) getRequestedMetrics(requestedAuthors map[string]bool) []string {
+func (h *Handler) getRequestedMetrics(kind string, requestedAuthors map[string]bool) []string {
 	if len(requestedAuthors) == 0 {
 		log.Printf("[handler] No author filter present; all metrics will be generated")
 		return nil // nil means all metrics
 	}
 
 	var metrics []string
-	for _, metric := range keys.UserMetrics {
-		if h.shouldGenerateMetric(metric, requestedAuthors) {
+	allMetrics := keys.UserMetrics
+	if kind == KindEventAssertionStr || kind == KindAddressAssertionStr {
+		allMetrics = keys.EventMetrics
+	}
+	for _, metric := range allMetrics {
+		if h.shouldGenerateMetric(kind, metric, requestedAuthors) {
 			metrics = append(metrics, metric)
 		}
 	}
@@ -188,7 +199,7 @@ func (h *Handler) streamUserAssertions(ctx context.Context, pubkey string, reque
 	}
 
 	// Determine which metrics are requested and what filters we need
-	requestedMetrics := h.getRequestedMetrics(requestedAuthors)
+	requestedMetrics := h.getRequestedMetrics(KindUserAssertionStr, requestedAuthors)
 	filterType := keys.GetRequiredFilters(requestedMetrics)
 
 	log.Printf("[handler] Starting lazy load for user %s (metrics: %v, filterType: %d)", pubkey[:16]+"...", requestedMetrics, filterType)
@@ -200,7 +211,7 @@ func (h *Handler) streamUserAssertions(ctx context.Context, pubkey string, reque
 	}
 
 	// Send initial metrics from local DB (will be 0 if no cached data)
-	h.sendUserMetrics(ctx, pubkey, requestedAuthors, yield, false)
+	h.sendUserMetrics(ctx, pubkey, KindUserAssertionStr, requestedAuthors, yield, false)
 
 	// Start async sync with only the required filters
 	progress := h.syncer.SyncUserEventsAsync(ctx, pubkey, userRelays, filterType)
@@ -219,7 +230,7 @@ func (h *Handler) streamUserAssertions(ctx context.Context, pubkey string, reque
 		case <-progress.Done:
 			// Final update
 			log.Printf("[handler] Sync complete for %s, sending final metrics", pubkey[:16]+"...")
-			h.sendUserMetrics(ctx, pubkey, requestedAuthors, yield, true)
+			h.sendUserMetrics(ctx, pubkey, KindUserAssertionStr, requestedAuthors, yield, true)
 			return
 
 		case <-ticker.C:
@@ -228,7 +239,7 @@ func (h *Handler) streamUserAssertions(ctx context.Context, pubkey string, reque
 			if currentCount > lastEventCount {
 				log.Printf("[handler] Progress update for %s: %d events (was %d)", pubkey[:16]+"...", currentCount, lastEventCount)
 				lastEventCount = currentCount
-				h.sendUserMetrics(ctx, pubkey, requestedAuthors, yield, false)
+				h.sendUserMetrics(ctx, pubkey, KindUserAssertionStr, requestedAuthors, yield, false)
 			}
 		}
 	}
@@ -236,8 +247,8 @@ func (h *Handler) streamUserAssertions(ctx context.Context, pubkey string, reque
 
 // sendUserMetrics computes and sends user metric events
 // isFinal indicates this is the last update (publish to storage relays)
-func (h *Handler) sendUserMetrics(ctx context.Context, pubkey string, requestedAuthors map[string]bool, yield func(nostr.Event) bool, isFinal bool) {
-	log.Printf("[handler] sendUserMetrics start pubkey=%s requestedAuthors=%v isFinal=%t", truncateSubject(pubkey), requestedAuthors, isFinal)
+func (h *Handler) sendUserMetrics(ctx context.Context, pubkey string, kind string, requestedAuthors map[string]bool, yield func(nostr.Event) bool, isFinal bool) {
+	log.Printf("[handler] sendUserMetrics start pubkey=%s kind=%s requestedAuthors=%v isFinal=%t", truncateSubject(pubkey), kind, requestedAuthors, isFinal)
 	pTag := nostr.Tag{"p", pubkey}
 
 	// Always compute from local DB (returns 0s if no data)
@@ -253,11 +264,11 @@ func (h *Handler) sendUserMetrics(ctx context.Context, pubkey string, requestedA
 	}
 
 	for _, name := range metricNames {
-		if !h.shouldGenerateMetric(name, requestedAuthors) {
+		if !h.shouldGenerateMetric(kind, name, requestedAuthors) {
 			continue
 		}
 
-		event, err := h.createMetricEvent(KindUserAssertion, pubkey, name, m[name], pTag)
+		event, err := h.createMetricEvent(KindUserAssertion, pubkey, kind, name, m[name], pTag)
 		if err != nil {
 			log.Printf("[handler] Failed to create %s event: %v", name, err)
 			continue
@@ -276,7 +287,7 @@ func (h *Handler) sendUserMetrics(ctx context.Context, pubkey string, requestedA
 	}
 
 	// Handle topics
-	if h.shouldGenerateMetric("t", requestedAuthors) {
+	if h.shouldGenerateMetric(kind, "t", requestedAuthors) {
 		if topics, ok := m["_topics"]; ok && topics != "" {
 			topicEvent := nostr.Event{
 				Kind:      KindUserAssertion,
@@ -292,7 +303,7 @@ func (h *Handler) sendUserMetrics(ctx context.Context, pubkey string, requestedA
 					topicEvent.Tags = append(topicEvent.Tags, nostr.Tag{"t", topic})
 				}
 			}
-			if err := h.keyManager.SignEventForMetric(&topicEvent, "t"); err == nil {
+			if err := h.keyManager.SignEventForMetric(&topicEvent, kind, "t"); err == nil {
 				if isFinal {
 					h.publishToStorageRelays(topicEvent)
 				}
@@ -356,11 +367,11 @@ func (h *Handler) generateUserAssertions(ctx context.Context, pubkey string, req
 
 	for _, mv := range metricValues {
 		// Skip if this metric wasn't requested
-		if !h.shouldGenerateMetric(mv.name, requestedAuthors) {
+		if !h.shouldGenerateMetric(KindUserAssertionStr, mv.name, requestedAuthors) {
 			continue
 		}
 
-		event, err := h.createMetricEvent(KindUserAssertion, pubkey, mv.name, mv.value, pTag)
+		event, err := h.createMetricEvent(KindUserAssertion, pubkey, KindUserAssertionStr, mv.name, mv.value, pTag)
 		if err != nil {
 			log.Printf("[handler] Failed to create %s event: %v", mv.name, err)
 			continue
@@ -370,7 +381,7 @@ func (h *Handler) generateUserAssertions(ctx context.Context, pubkey string, req
 	}
 
 	// Handle topics separately (multiple t tags in one event)
-	if h.shouldGenerateMetric("t", requestedAuthors) {
+	if h.shouldGenerateMetric(KindUserAssertionStr, "t", requestedAuthors) {
 		if topics, ok := m["_topics"]; ok && topics != "" {
 			topicEvent := nostr.Event{
 				Kind:      KindUserAssertion,
@@ -386,7 +397,7 @@ func (h *Handler) generateUserAssertions(ctx context.Context, pubkey string, req
 					topicEvent.Tags = append(topicEvent.Tags, nostr.Tag{"t", topic})
 				}
 			}
-			if err := h.keyManager.SignEventForMetric(&topicEvent, "t"); err == nil {
+			if err := h.keyManager.SignEventForMetric(&topicEvent, KindUserAssertionStr, "t"); err == nil {
 				events = append(events, topicEvent)
 				h.publishToStorageRelays(topicEvent)
 			}
@@ -406,7 +417,7 @@ func (h *Handler) streamEventAssertions(ctx context.Context, eventID string, req
 	log.Printf("[handler] Starting lazy load for event %s", eventID[:16]+"...")
 
 	// Send initial metrics from local DB
-	h.sendEventMetrics(ctx, eventID, requestedAuthors, yield, false)
+	h.sendEventMetrics(ctx, eventID, KindEventAssertionStr, requestedAuthors, yield, false)
 
 	// Start async sync
 	progress := h.syncer.SyncEventInteractionsAsync(ctx, eventID)
@@ -422,21 +433,21 @@ func (h *Handler) streamEventAssertions(ctx context.Context, eventID string, req
 			return
 		case <-progress.Done:
 			log.Printf("[handler] Sync complete for event %s, sending final metrics", eventID[:16]+"...")
-			h.sendEventMetrics(ctx, eventID, requestedAuthors, yield, true)
+			h.sendEventMetrics(ctx, eventID, KindEventAssertionStr, requestedAuthors, yield, true)
 			return
 		case <-ticker.C:
 			currentCount := atomic.LoadInt64(&progress.EventCount)
 			if currentCount > lastEventCount {
 				lastEventCount = currentCount
-				h.sendEventMetrics(ctx, eventID, requestedAuthors, yield, false)
+				h.sendEventMetrics(ctx, eventID, KindEventAssertionStr, requestedAuthors, yield, false)
 			}
 		}
 	}
 }
 
 // sendEventMetrics computes and sends event metric events
-func (h *Handler) sendEventMetrics(ctx context.Context, eventID string, requestedAuthors map[string]bool, yield func(nostr.Event) bool, isFinal bool) {
-	log.Printf("[handler] sendEventMetrics start eventID=%s requestedAuthors=%v isFinal=%t", eventID[:16]+"...", requestedAuthors, isFinal)
+func (h *Handler) sendEventMetrics(ctx context.Context, eventID string, kind string, requestedAuthors map[string]bool, yield func(nostr.Event) bool, isFinal bool) {
+	log.Printf("[handler] sendEventMetrics start eventID=%s kind=%s requestedAuthors=%v isFinal=%t", eventID[:16]+"...", kind, requestedAuthors, isFinal)
 	eTag := nostr.Tag{"e", eventID}
 	m := metrics.ComputeEventMetrics(h.db, eventID)
 	log.Printf("[handler] Computed event metrics for %s: %v", eventID[:16]+"...", m)
@@ -444,11 +455,11 @@ func (h *Handler) sendEventMetrics(ctx context.Context, eventID string, requeste
 	metricNames := []string{"comment_cnt", "quote_cnt", "repost_cnt", "reaction_cnt", "zap_cnt", "zap_amount", "rank"}
 
 	for _, name := range metricNames {
-		if !h.shouldGenerateMetric(name, requestedAuthors) {
+		if !h.shouldGenerateMetric(kind, name, requestedAuthors) {
 			continue
 		}
 
-		event, err := h.createMetricEvent(KindEventAssertion, eventID, name, m[name], eTag)
+		event, err := h.createMetricEvent(KindEventAssertion, eventID, kind, name, m[name], eTag)
 		if err != nil {
 			log.Printf("[handler] Failed to create %s event for eventID=%s: %v", name, eventID[:16]+"...", err)
 			continue
@@ -473,7 +484,7 @@ func (h *Handler) streamAddressAssertions(ctx context.Context, address string, r
 	log.Printf("[handler] Starting lazy load for address %s", address)
 
 	// Send initial metrics from local DB
-	h.sendAddressMetrics(ctx, address, requestedAuthors, yield, false)
+	h.sendAddressMetrics(ctx, address, KindAddressAssertionStr, requestedAuthors, yield, false)
 
 	// Start async sync
 	progress := h.syncer.SyncAddressInteractionsAsync(ctx, address)
@@ -489,21 +500,21 @@ func (h *Handler) streamAddressAssertions(ctx context.Context, address string, r
 			return
 		case <-progress.Done:
 			log.Printf("[handler] Sync complete for address %s, sending final metrics", address)
-			h.sendAddressMetrics(ctx, address, requestedAuthors, yield, true)
+			h.sendAddressMetrics(ctx, address, KindAddressAssertionStr, requestedAuthors, yield, true)
 			return
 		case <-ticker.C:
 			currentCount := atomic.LoadInt64(&progress.EventCount)
 			if currentCount > lastEventCount {
 				lastEventCount = currentCount
-				h.sendAddressMetrics(ctx, address, requestedAuthors, yield, false)
+				h.sendAddressMetrics(ctx, address, KindAddressAssertionStr, requestedAuthors, yield, false)
 			}
 		}
 	}
 }
 
 // sendAddressMetrics computes and sends address metric events
-func (h *Handler) sendAddressMetrics(ctx context.Context, address string, requestedAuthors map[string]bool, yield func(nostr.Event) bool, isFinal bool) {
-	log.Printf("[handler] sendAddressMetrics start address=%s requestedAuthors=%v isFinal=%t", address, requestedAuthors, isFinal)
+func (h *Handler) sendAddressMetrics(ctx context.Context, address string, kind string, requestedAuthors map[string]bool, yield func(nostr.Event) bool, isFinal bool) {
+	log.Printf("[handler] sendAddressMetrics start address=%s kind=%s requestedAuthors=%v isFinal=%t", address, kind, requestedAuthors, isFinal)
 	aTag := nostr.Tag{"a", address}
 	m := metrics.ComputeAddressMetrics(h.db, address)
 	log.Printf("[handler] Computed address metrics for %s: %v", address, m)
@@ -511,11 +522,11 @@ func (h *Handler) sendAddressMetrics(ctx context.Context, address string, reques
 	metricNames := []string{"comment_cnt", "quote_cnt", "repost_cnt", "reaction_cnt", "zap_cnt", "zap_amount", "rank"}
 
 	for _, name := range metricNames {
-		if !h.shouldGenerateMetric(name, requestedAuthors) {
+		if !h.shouldGenerateMetric(kind, name, requestedAuthors) {
 			continue
 		}
 
-		event, err := h.createMetricEvent(KindAddressAssertion, address, name, m[name], aTag)
+		event, err := h.createMetricEvent(KindAddressAssertion, address, kind, name, m[name], aTag)
 		if err != nil {
 			log.Printf("[handler] Failed to create %s event for address=%s: %v", name, address, err)
 			continue
@@ -565,11 +576,11 @@ func (h *Handler) generateEventAssertions(ctx context.Context, eventID string, r
 
 	for _, mv := range metricValues {
 		// Skip if this metric wasn't requested
-		if !h.shouldGenerateMetric(mv.name, requestedAuthors) {
+		if !h.shouldGenerateMetric(KindEventAssertionStr, mv.name, requestedAuthors) {
 			continue
 		}
 
-		event, err := h.createMetricEvent(KindEventAssertion, eventID, mv.name, mv.value, eTag)
+		event, err := h.createMetricEvent(KindEventAssertion, eventID, KindEventAssertionStr, mv.name, mv.value, eTag)
 		if err != nil {
 			log.Printf("[handler] Failed to create %s event: %v", mv.name, err)
 			continue
@@ -611,11 +622,11 @@ func (h *Handler) generateAddressAssertions(ctx context.Context, address string,
 
 	for _, mv := range metricValues {
 		// Skip if this metric wasn't requested
-		if !h.shouldGenerateMetric(mv.name, requestedAuthors) {
+		if !h.shouldGenerateMetric(KindAddressAssertionStr, mv.name, requestedAuthors) {
 			continue
 		}
 
-		event, err := h.createMetricEvent(KindAddressAssertion, address, mv.name, mv.value, aTag)
+		event, err := h.createMetricEvent(KindAddressAssertion, address, KindAddressAssertionStr, mv.name, mv.value, aTag)
 		if err != nil {
 			log.Printf("[handler] Failed to create %s event: %v", mv.name, err)
 			continue

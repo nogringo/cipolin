@@ -10,6 +10,7 @@ import (
 
 // MetricKey holds the keypair for a specific metric
 type MetricKey struct {
+	Kind       string        `json:"kind"`
 	Metric     string        `json:"metric"`
 	PrivateKey [32]byte
 	PublicKey  nostr.PubKey
@@ -18,10 +19,23 @@ type MetricKey struct {
 // MetricKeyManager manages deterministic keys for each metric
 type MetricKeyManager struct {
 	masterKey  string
-	metricKeys map[string]*MetricKey
+	metricKeys map[string]*MetricKey // key is "kind:metric"
 }
 
-// All supported metrics across all NIP-85 kinds
+// MetricKindPair represents a kind+metric combination for key derivation
+type MetricKindPair struct {
+	Kind    string
+	Metrics []string
+}
+
+// AllMetricKinds defines all kind+metric pairs to derive keys for
+var AllMetricKinds = []MetricKindPair{
+	{"30382", UserMetrics},
+	{"30383", EventMetrics},
+	{"30384", EventMetrics},
+}
+
+// All supported metrics across all NIP-85 kinds (kept for backwards compat)
 var AllMetrics = []string{
 	// Kind 30382 (User assertions)
 	"followers", "rank", "first_created_at", "first_seen_at",
@@ -131,49 +145,58 @@ func NewMetricKeyManager(masterKey string) *MetricKeyManager {
 	return km
 }
 
-// deriveKey deterministically derives a 32-byte private key from master + metric name
-func (km *MetricKeyManager) deriveKey(metric string) [32]byte {
-	// Use SHA256(masterKey + ":nip85:" + metric) as the private key
-	seed := km.masterKey + ":nip85:" + metric
+// mapKey returns the composite map key "kind:metric"
+func mapKey(kind, metric string) string {
+	return kind + ":" + metric
+}
+
+// deriveKey deterministically derives a 32-byte private key from master + kind + metric name
+func (km *MetricKeyManager) deriveKey(kind string, metric string) [32]byte {
+	// Use SHA256(masterKey + ":nip85:" + kind + ":" + metric) as the private key
+	seed := km.masterKey + ":nip85:" + kind + ":" + metric
 	hash := sha256.Sum256([]byte(seed))
 	return hash
 }
 
-// deriveAllKeys generates keys for all supported metrics
+// deriveAllKeys generates keys for all supported kind+metric combinations
 func (km *MetricKeyManager) deriveAllKeys() {
-	for _, metric := range AllMetrics {
-		privKey := km.deriveKey(metric)
-		pubKey := nostr.GetPublicKey(privKey)
+	for _, mk := range AllMetricKinds {
+		for _, metric := range mk.Metrics {
+			privKey := km.deriveKey(mk.Kind, metric)
+			pubKey := nostr.GetPublicKey(privKey)
+			key := mapKey(mk.Kind, metric)
 
-		km.metricKeys[metric] = &MetricKey{
-			Metric:     metric,
-			PrivateKey: privKey,
-			PublicKey:  pubKey,
+			km.metricKeys[key] = &MetricKey{
+				Kind:       mk.Kind,
+				Metric:     metric,
+				PrivateKey: privKey,
+				PublicKey:  pubKey,
+			}
 		}
 	}
 	log.Printf("[keys] Derived %d metric keys from master key", len(km.metricKeys))
 }
 
-// GetKey returns the keypair for a specific metric
-func (km *MetricKeyManager) GetKey(metric string) (*MetricKey, error) {
-	key, ok := km.metricKeys[metric]
+// GetKey returns the keypair for a specific kind+metric
+func (km *MetricKeyManager) GetKey(kind string, metric string) (*MetricKey, error) {
+	key, ok := km.metricKeys[mapKey(kind, metric)]
 	if !ok {
-		return nil, fmt.Errorf("unknown metric: %s", metric)
+		return nil, fmt.Errorf("unknown metric: kind=%s metric=%s", kind, metric)
 	}
 	return key, nil
 }
 
-// GetPubKey returns the hex-encoded public key for a metric
-func (km *MetricKeyManager) GetPubKey(metric string) string {
-	if key, ok := km.metricKeys[metric]; ok {
+// GetPubKey returns the hex-encoded public key for a kind+metric
+func (km *MetricKeyManager) GetPubKey(kind string, metric string) string {
+	if key, ok := km.metricKeys[mapKey(kind, metric)]; ok {
 		return key.PublicKey.Hex()
 	}
 	return ""
 }
 
 // SignEventForMetric signs an event using the metric-specific key
-func (km *MetricKeyManager) SignEventForMetric(event *nostr.Event, metric string) error {
-	key, err := km.GetKey(metric)
+func (km *MetricKeyManager) SignEventForMetric(event *nostr.Event, kind string, metric string) error {
+	key, err := km.GetKey(kind, metric)
 	if err != nil {
 		return err
 	}
@@ -181,11 +204,11 @@ func (km *MetricKeyManager) SignEventForMetric(event *nostr.Event, metric string
 	return event.Sign(key.PrivateKey)
 }
 
-// GetAllPubKeys returns a map of metric -> pubkey (hex-encoded) for client configuration
+// GetAllPubKeys returns a map of "kind:metric" -> pubkey (hex-encoded) for client configuration
 func (km *MetricKeyManager) GetAllPubKeys() map[string]string {
 	result := make(map[string]string)
-	for metric, key := range km.metricKeys {
-		result[metric] = key.PublicKey.Hex()
+	for key, mk := range km.metricKeys {
+		result[key] = mk.PublicKey.Hex()
 	}
 	return result
 }
@@ -196,21 +219,21 @@ func (km *MetricKeyManager) GetKind10040Tags(relayURL string) [][]string {
 
 	// Kind 30382 (User) metrics
 	for _, metric := range UserMetrics {
-		if pk := km.GetPubKey(metric); pk != "" {
+		if pk := km.GetPubKey("30382", metric); pk != "" {
 			tags = append(tags, []string{fmt.Sprintf("30382:%s", metric), pk, relayURL})
 		}
 	}
 
 	// Kind 30383 (Event) metrics
 	for _, metric := range EventMetrics {
-		if pk := km.GetPubKey(metric); pk != "" {
+		if pk := km.GetPubKey("30383", metric); pk != "" {
 			tags = append(tags, []string{fmt.Sprintf("30383:%s", metric), pk, relayURL})
 		}
 	}
 
 	// Kind 30384 (Address) metrics
 	for _, metric := range EventMetrics {
-		if pk := km.GetPubKey(metric); pk != "" {
+		if pk := km.GetPubKey("30384", metric); pk != "" {
 			tags = append(tags, []string{fmt.Sprintf("30384:%s", metric), pk, relayURL})
 		}
 	}
