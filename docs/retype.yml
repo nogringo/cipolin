@@ -1,0 +1,32 @@
+input: .
+output: .retype
+url: ##
+branding:
+  title: Cipolin
+  label: v0.0.1
+links:
+- text: github
+  link: https://github.com/nogringo/cipolin
+nav:
+- text: Home
+  link: index.md
+- text: Architecture
+  link: architecture/index.md
+  children:
+  - text: Request Lifecycle
+    link: architecture/request-lifecycle.md
+  - text: Why Just-In-Time
+    link: architecture/just-in-time.md
+  - text: Sync And Storage
+    link: architecture/sync-and-storage.md
+  - text: Rank And Signing
+    link: architecture/rank-and-signing.md
+- text: Guides
+  link: guides/index.md
+  children:
+  - text: Run Cipolin
+    link: guides/run.md
+  - text: Use Cipolin with nak
+    link: guides/usage.md
+footer:
+  copyright: "&copy; Copyright {{ year }}. All rights reserved."
