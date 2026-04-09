@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://nogringo.github.io/cipolin/sitemap.xml

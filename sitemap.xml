@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://nogringo.github.io/cipolin/</loc>
+  </url>
+  <url>
+    <loc>https://nogringo.github.io/cipolin/architecture/</loc>
+  </url>
+  <url>
+    <loc>https://nogringo.github.io/cipolin/guides/</loc>
+  </url>
+  <url>
+    <loc>https://nogringo.github.io/cipolin/guides/run/</loc>
+  </url>
+  <url>
+    <loc>https://nogringo.github.io/cipolin/guides/usage/</loc>
+  </url>
+  <url>
+    <loc>https://nogringo.github.io/cipolin/architecture/sync-and-storage/</loc>
+  </url>
+  <url>
+    <loc>https://nogringo.github.io/cipolin/architecture/just-in-time/</loc>
+  </url>
+  <url>
+    <loc>https://nogringo.github.io/cipolin/architecture/rank-and-signing/</loc>
+  </url>
+  <url>
+    <loc>https://nogringo.github.io/cipolin/architecture/request-lifecycle/</loc>
+  </url>
+</urlset>

@@ -1,0 +1,19 @@
+﻿# Cipolin
+
+> Cipolin is a NIP-85 trusted assertions provider for Nostr.
+
+- [Cipolin](https://nogringo.github.io/cipolin/index.md): Cipolin
+- [Guides](https://nogringo.github.io/cipolin/guides/index.md): Practical documentation for running and using Cipolin.
+- [Architecture](https://nogringo.github.io/cipolin/architecture/index.md): Cipolin is a Nostr relay that intercepts NIP-85 metric queries, computes assertions from synchronized source events, signs them with per-metric keys, and returns them in the same request flow.
+
+## Guides
+
+- [Use Cipolin with nak](https://nogringo.github.io/cipolin/guides/usage.md): Cipolin is queried like a relay. Use NIP-85 kinds and d tags to request assertions.
+- [Run Cipolin](https://nogringo.github.io/cipolin/guides/run.md): This guide covers local and Docker setup.
+
+## Architecture
+
+- [Rank And Signing](https://nogringo.github.io/cipolin/architecture/rank-and-signing.md): This page covers user rank computation and the per-metric signing model.
+- [Sync And Storage](https://nogringo.github.io/cipolin/architecture/sync-and-storage.md): Cipolin computes assertions from local persisted source events, while continuously improving that local dataset through sync.
+- [Why Just-In-Time vs Pre Compute](https://nogringo.github.io/cipolin/architecture/just-in-time.md): Cipolin uses just-in-time (JIT) computation: compute assertions when requested, not through a giant always-on global precompute pipeline.
+- [Request Lifecycle](https://nogringo.github.io/cipolin/architecture/request-lifecycle.md): This page explains what happens from a NIP-85 query to final assertion publication.
