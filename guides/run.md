@@ -32,12 +32,27 @@ NEO4J_PASSWORD=your_password
 NEO4J_DATABASE=neo4j
 RANK_CACHE_TTL_SECONDS=15
 NEO4J_QUERY_TIMEOUT_SECONDS=20
+
+ENABLE_NIP42_AUTH=false
+REQUEST_POLICY_PLUGIN=
+REQUEST_POLICY_TIMEOUT_MS=1500
+REQUEST_POLICY_FAIL_OPEN=false
 ```
 
 Notes:
 
 - `NEO4J_PASSWORD` is required. Cipolin exits if it is missing.
 - If `NIP85_MASTER_KEY` is empty, Cipolin generates a temporary key on boot.
+
+Optional request policy plugin example:
+
+```bash
+chmod +x ./scripts/request-policy.js
+REQUEST_POLICY_PLUGIN=./scripts/request-policy.js \
+ALLOW_PUBKEYS=<hex-pubkey> \
+RATE_LIMIT_PER_MIN=60 \
+go run ./cmd/cipolin/main.go
+```
 
 ## 2) Start Neo4j (with GDS)
 
