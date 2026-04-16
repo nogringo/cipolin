@@ -16,6 +16,7 @@ import (
 	"cipolin/internal/keys"
 	"cipolin/internal/metrics"
 	"cipolin/internal/relay"
+	"cipolin/internal/requestpolicy"
 
 	"fiatjaf.com/nostr"
 	"fiatjaf.com/nostr/eventstore/boltdb"
@@ -26,31 +27,36 @@ import (
 
 // Config holds application configuration
 type Config struct {
-	MasterKey     string
-	Port          string
-	StorageRelays []string
-	DBPath        string
-	FetchTTL      time.Duration
-	FetchTimeout  time.Duration
-	RelayURL      string // Public relay URL for kind 10040 tags
-	Neo4jURI      string
-	Neo4jUsername string
-	Neo4jPassword string
-	Neo4jDatabase string
-	RankCacheTTL  time.Duration
-	Neo4jTimeout  time.Duration
+	MasterKey             string
+	Port                  string
+	StorageRelays         []string
+	DBPath                string
+	FetchTTL              time.Duration
+	FetchTimeout          time.Duration
+	RelayURL              string // Public relay URL for kind 10040 tags
+	Neo4jURI              string
+	Neo4jUsername         string
+	Neo4jPassword         string
+	Neo4jDatabase         string
+	RankCacheTTL          time.Duration
+	Neo4jTimeout          time.Duration
+	EnableNIP42Auth       bool
+	RequestPolicyPlugin   string
+	RequestPolicyTimeout  time.Duration
+	RequestPolicyFailOpen bool
 }
 
 func loadConfig() Config {
 	cfg := Config{
-		MasterKey:     os.Getenv("NIP85_MASTER_KEY"),
-		Port:          os.Getenv("PORT"),
-		DBPath:        os.Getenv("DB_PATH"),
-		RelayURL:      os.Getenv("RELAY_URL"),
-		Neo4jURI:      os.Getenv("NEO4J_URI"),
-		Neo4jUsername: os.Getenv("NEO4J_USERNAME"),
-		Neo4jPassword: os.Getenv("NEO4J_PASSWORD"),
-		Neo4jDatabase: os.Getenv("NEO4J_DATABASE"),
+		MasterKey:           os.Getenv("NIP85_MASTER_KEY"),
+		Port:                os.Getenv("PORT"),
+		DBPath:              os.Getenv("DB_PATH"),
+		RelayURL:            os.Getenv("RELAY_URL"),
+		Neo4jURI:            os.Getenv("NEO4J_URI"),
+		Neo4jUsername:       os.Getenv("NEO4J_USERNAME"),
+		Neo4jPassword:       os.Getenv("NEO4J_PASSWORD"),
+		Neo4jDatabase:       os.Getenv("NEO4J_DATABASE"),
+		RequestPolicyPlugin: os.Getenv("REQUEST_POLICY_PLUGIN"),
 	}
 
 	// Fallback to old env var name for backwards compatibility
@@ -116,6 +122,18 @@ func loadConfig() Config {
 		cfg.Neo4jTimeout = 20 * time.Second
 	}
 
+	cfg.EnableNIP42Auth = parseBoolEnv("ENABLE_NIP42_AUTH", false)
+	cfg.RequestPolicyFailOpen = parseBoolEnv("REQUEST_POLICY_FAIL_OPEN", false)
+
+	if timeoutMsStr := os.Getenv("REQUEST_POLICY_TIMEOUT_MS"); timeoutMsStr != "" {
+		if timeoutMs, err := strconv.Atoi(timeoutMsStr); err == nil {
+			cfg.RequestPolicyTimeout = time.Duration(timeoutMs) * time.Millisecond
+		}
+	}
+	if cfg.RequestPolicyTimeout == 0 {
+		cfg.RequestPolicyTimeout = 1500 * time.Millisecond
+	}
+
 	// Parse storage relays
 	if relays := os.Getenv("STORAGE_RELAYS"); relays != "" {
 		cfg.StorageRelays = splitRelays(relays)
@@ -127,6 +145,22 @@ func loadConfig() Config {
 	}
 
 	return cfg
+}
+
+func parseBoolEnv(key string, defaultValue bool) bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	if v == "" {
+		return defaultValue
+	}
+
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return defaultValue
+	}
 }
 
 // splitRelays parses a comma-separated relay list
@@ -213,7 +247,42 @@ func main() {
 	r.Info.Description = "On-demand computation of user and event metrics with per-metric signing keys"
 	pubKey := nostr.MustPubKeyFromHex(keyManager.GetPubKey("30382", "rank"))
 	r.Info.PubKey = &pubKey // Use rank pubkey as relay identity
-	r.Info.SupportedNIPs = []any{11, 85}
+	r.Info.SupportedNIPs = []any{11, 42, 85}
+
+	var requestPlugin *requestpolicy.PluginEngine
+	if config.RequestPolicyPlugin != "" {
+		requestPlugin = requestpolicy.NewPluginEngine(requestpolicy.Config{
+			Command:  config.RequestPolicyPlugin,
+			Timeout:  config.RequestPolicyTimeout,
+			FailOpen: config.RequestPolicyFailOpen,
+		}, log.Default())
+		defer requestPlugin.Close()
+	}
+
+	requestPolicies := make([]func(context.Context, nostr.Filter) (bool, string), 0, 2)
+	countPolicies := make([]func(context.Context, nostr.Filter) (bool, string), 0, 2)
+
+	if config.EnableNIP42Auth {
+		requestPolicies = append(requestPolicies, policies.MustAuth)
+		countPolicies = append(countPolicies, policies.MustAuth)
+	}
+
+	if requestPlugin != nil {
+		requestPolicies = append(requestPolicies, func(ctx context.Context, filter nostr.Filter) (bool, string) {
+			return requestPlugin.EvaluateRequest(ctx, filter, "REQ")
+		})
+		countPolicies = append(countPolicies, func(ctx context.Context, filter nostr.Filter) (bool, string) {
+			return requestPlugin.EvaluateRequest(ctx, filter, "COUNT")
+		})
+	}
+
+	if len(requestPolicies) > 0 {
+		r.OnRequest = policies.SeqRequest(requestPolicies...)
+	}
+
+	if len(countPolicies) > 0 {
+		r.OnCount = policies.SeqRequest(countPolicies...)
+	}
 
 	// Use eventstore for storage
 	r.UseEventstore(db, 10_000_000)
@@ -300,6 +369,10 @@ func main() {
 	log.Printf("Public relay URL: %s", config.RelayURL)
 	log.Printf("Storage relays: %v", config.StorageRelays)
 	log.Printf("Neo4j: %s (db=%s, rank cache ttl=%v)", config.Neo4jURI, config.Neo4jDatabase, config.RankCacheTTL)
+	log.Printf("NIP-42 required for REQ/COUNT: %t", config.EnableNIP42Auth)
+	if config.RequestPolicyPlugin != "" {
+		log.Printf("Request policy plugin enabled: %s (timeout=%v, fail_open=%t)", config.RequestPolicyPlugin, config.RequestPolicyTimeout, config.RequestPolicyFailOpen)
+	}
 	log.Printf("Endpoints: / (relay), /keys (metric pubkeys)")
 
 	if err := http.ListenAndServe(":"+config.Port, r); err != nil {

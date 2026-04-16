@@ -92,6 +92,46 @@ NEO4J_DATABASE=neo4j
 # Rank cache TTL and Neo4j query timeout (seconds)
 RANK_CACHE_TTL_SECONDS=15
 NEO4J_QUERY_TIMEOUT_SECONDS=20
+
+# Require NIP-42 AUTH for REQ/COUNT requests
+ENABLE_NIP42_AUTH=false
+
+# Optional request policy plugin command
+REQUEST_POLICY_PLUGIN=
+REQUEST_POLICY_TIMEOUT_MS=1500
+REQUEST_POLICY_FAIL_OPEN=false
+```
+
+### Request Policy Plugin Protocol
+
+When `REQUEST_POLICY_PLUGIN` is set, Cipolin starts the plugin command and sends one JSON line per request (`REQ`/`COUNT`) to stdin.
+
+Input JSON fields:
+
+- `type`: always `new`
+- `id`: request correlation id (must be echoed back)
+- `filter`: full Nostr filter from the client
+- `receivedAt`: unix timestamp (seconds)
+- `sourceType`: `IP4`, `IP6`, or `Unknown`
+- `sourceInfo`: source IP when available
+- `authed`: present only when the connection completed NIP-42 AUTH (hex pubkey)
+- `requestType`: `REQ` or `COUNT`
+
+Output JSON fields:
+
+- `id`: same as input id
+- `action`: `accept`, `reject`, or `shadowReject`
+- `msg`: optional NIP-20 message for `reject`
+
+This lets you implement per-pubkey allow/deny and custom rate limiting in any language.
+
+Example bundled plugin:
+
+```bash
+chmod +x ./scripts/request-policy.js
+REQUEST_POLICY_PLUGIN=./scripts/request-policy.js \
+ALLOW_PUBKEYS=<hex-pubkey-1>,<hex-pubkey-2> \
+RATE_LIMIT_PER_MIN=120 \
 ```
 
 ## Usage
