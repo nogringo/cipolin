@@ -10,8 +10,8 @@ import (
 
 // MetricKey holds the keypair for a specific metric
 type MetricKey struct {
-	Kind       string        `json:"kind"`
-	Metric     string        `json:"metric"`
+	Kind       string `json:"kind"`
+	Metric     string `json:"metric"`
 	PrivateKey [32]byte
 	PublicKey  nostr.PubKey
 }
@@ -54,14 +54,15 @@ var AllMetrics = []string{
 type FilterType int
 
 const (
-	FilterPosts      FilterType = 1 << iota // kind 1 authored
-	FilterReactions                         // kind 7 authored
-	FilterFollowers                         // kind 3 tagging user
-	FilterZapsRecd                          // kind 9735, 9321 tagging user (received)
-	FilterZapsSent                          // kind 9735, 9321 authored (sent)
-	FilterReportsRecd                       // kind 1984 tagging user
-	FilterReportsSent                       // kind 1984 authored
-	FilterAll        = FilterPosts | FilterReactions | FilterFollowers | FilterZapsRecd | FilterZapsSent | FilterReportsRecd | FilterReportsSent
+	FilterPosts       FilterType = 1 << iota // kind 1 authored
+	FilterReactions                          // kind 7 authored
+	FilterFollowers                          // kind 3 tagging user
+	FilterZapsRecd                           // kind 9735, 9321 tagging user (received)
+	FilterZapsSent                           // kind 9735, 9321 authored (sent)
+	FilterReportsRecd                        // kind 1984 tagging user
+	FilterReportsSent                        // kind 1984 authored
+	FilterMuteLists                          // kind 10000 authored (user's mute list)
+	FilterAll         = FilterPosts | FilterReactions | FilterFollowers | FilterZapsRecd | FilterZapsSent | FilterReportsRecd | FilterReportsSent | FilterMuteLists
 )
 
 // MetricFilters maps each metric to the filter types it needs
