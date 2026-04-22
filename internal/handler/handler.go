@@ -13,6 +13,7 @@ import (
 	"cipolin/internal/relay"
 
 	"fiatjaf.com/nostr"
+	"fiatjaf.com/nostr/khatru"
 )
 
 // Update interval for lazy loading
@@ -251,8 +252,14 @@ func (h *Handler) sendUserMetrics(ctx context.Context, pubkey string, kind strin
 	log.Printf("[handler] sendUserMetrics start pubkey=%s kind=%s requestedAuthors=%v isFinal=%t", truncateSubject(pubkey), kind, requestedAuthors, isFinal)
 	pTag := nostr.Tag{"p", pubkey}
 
+	// Extract authed pubkey as perspective for personalized rank (empty if not authed).
+	var perspective string
+	if authed, ok := khatru.GetAuthed(ctx); ok {
+		perspective = authed.Hex()
+	}
+
 	// Always compute from local DB (returns 0s if no data)
-	m := metrics.ComputeUserMetrics(ctx, h.db, pubkey, h.rankProvider)
+	m := metrics.ComputeUserMetrics(ctx, h.db, pubkey, perspective, h.rankProvider)
 
 	metricNames := []string{
 		"followers", "rank", "first_created_at",
@@ -334,8 +341,14 @@ func (h *Handler) generateUserAssertions(ctx context.Context, pubkey string, req
 
 	log.Printf("[handler] Computing metrics for %s...", pubkey[:16]+"...")
 
+	// Extract authed pubkey as perspective for personalized rank (empty if not authed).
+	var perspective string
+	if authed, ok := khatru.GetAuthed(ctx); ok {
+		perspective = authed.Hex()
+	}
+
 	// Compute metrics from local DB
-	m := metrics.ComputeUserMetrics(ctx, h.db, pubkey, h.rankProvider)
+	m := metrics.ComputeUserMetrics(ctx, h.db, pubkey, perspective, h.rankProvider)
 
 	log.Printf("[handler] Metrics computed for %s, building events...", pubkey[:16]+"...")
 

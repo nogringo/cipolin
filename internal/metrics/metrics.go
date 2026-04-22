@@ -70,8 +70,10 @@ func extractAmountFromNutzap(event nostr.Event) int64 {
 	return totalAmount
 }
 
-// ComputeUserMetrics computes kind 30382 metrics for a pubkey from local DB
-func ComputeUserMetrics(ctx context.Context, db EventStore, pubkey string, rankProvider UserRankProvider) map[string]string {
+// ComputeUserMetrics computes kind 30382 metrics for a pubkey from local DB.
+// perspective is the hex pubkey of the requesting user (for personalized rank);
+// pass an empty string for global rank.
+func ComputeUserMetrics(ctx context.Context, db EventStore, pubkey string, perspective string, rankProvider UserRankProvider) map[string]string {
 	metrics := make(map[string]string)
 
 	var (
@@ -283,7 +285,7 @@ func ComputeUserMetrics(ctx context.Context, db EventStore, pubkey string, rankP
 	// Calculate rank
 	rank := CalculateUserRank(followerCount, postCount, zapAmountRecd, zapCountRecd)
 	if rankProvider != nil {
-		if graphRank, err := rankProvider.GetUserRank(ctx, pubkey); err == nil {
+		if graphRank, err := rankProvider.GetUserRank(ctx, pubkey, perspective); err == nil {
 			rank = graphRank
 		}
 	}

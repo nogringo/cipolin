@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"context"
 	"iter"
 	"path/filepath"
 	"slices"
@@ -65,7 +66,7 @@ func TestComputeUserMetricsUsesPositiveQueryLimit(t *testing.T) {
 		},
 	}
 
-	metrics := ComputeUserMetrics(store, targetPub.Hex())
+	metrics := ComputeUserMetrics(context.Background(), store, targetPub.Hex(), "", nil)
 
 	if metrics["followers"] != "1" {
 		t.Fatalf("expected follower count 1, got %q", metrics["followers"])

@@ -40,6 +40,10 @@ type Config struct {
 	Neo4jDatabase         string
 	RankCacheTTL          time.Duration
 	Neo4jTimeout          time.Duration
+	GrapeRankEnabled      bool
+	SignalWeightFollow    float64
+	SignalWeightMute      float64
+	SignalWeightReport    float64
 	EnableNIP42Auth       bool
 	RequestPolicyPlugin   string
 	RequestPolicyTimeout  time.Duration
@@ -124,6 +128,10 @@ func loadConfig() Config {
 
 	cfg.EnableNIP42Auth = parseBoolEnv("ENABLE_NIP42_AUTH", false)
 	cfg.RequestPolicyFailOpen = parseBoolEnv("REQUEST_POLICY_FAIL_OPEN", false)
+	cfg.GrapeRankEnabled = parseBoolEnv("GRAPERANK_ENABLED", false)
+	cfg.SignalWeightFollow = parseFloat64Env("SIGNAL_WEIGHT_FOLLOW", 1.0)
+	cfg.SignalWeightMute = parseFloat64Env("SIGNAL_WEIGHT_MUTE", 0.0)
+	cfg.SignalWeightReport = parseFloat64Env("SIGNAL_WEIGHT_REPORT", 0.0)
 
 	if timeoutMsStr := os.Getenv("REQUEST_POLICY_TIMEOUT_MS"); timeoutMsStr != "" {
 		if timeoutMs, err := strconv.Atoi(timeoutMsStr); err == nil {
@@ -145,6 +153,17 @@ func loadConfig() Config {
 	}
 
 	return cfg
+}
+
+func parseFloat64Env(key string, defaultValue float64) float64 {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return defaultValue
+	}
+	if f, err := strconv.ParseFloat(v, 64); err == nil {
+		return f
+	}
+	return defaultValue
 }
 
 func parseBoolEnv(key string, defaultValue bool) bool {
@@ -226,12 +245,16 @@ func main() {
 	}
 
 	graphRank, err := metrics.NewGraphRankEngine(context.Background(), metrics.GraphRankEngineConfig{
-		URI:          config.Neo4jURI,
-		Username:     config.Neo4jUsername,
-		Password:     config.Neo4jPassword,
-		Database:     config.Neo4jDatabase,
-		CacheTTL:     config.RankCacheTTL,
-		QueryTimeout: config.Neo4jTimeout,
+		URI:                config.Neo4jURI,
+		Username:           config.Neo4jUsername,
+		Password:           config.Neo4jPassword,
+		Database:           config.Neo4jDatabase,
+		CacheTTL:           config.RankCacheTTL,
+		QueryTimeout:       config.Neo4jTimeout,
+		GrapeRankEnabled:   config.GrapeRankEnabled,
+		SignalWeightFollow: config.SignalWeightFollow,
+		SignalWeightMute:   config.SignalWeightMute,
+		SignalWeightReport: config.SignalWeightReport,
 	})
 	if err != nil {
 		log.Fatalf("Failed to initialize Neo4j rank engine: %v", err)
@@ -369,6 +392,7 @@ func main() {
 	log.Printf("Public relay URL: %s", config.RelayURL)
 	log.Printf("Storage relays: %v", config.StorageRelays)
 	log.Printf("Neo4j: %s (db=%s, rank cache ttl=%v)", config.Neo4jURI, config.Neo4jDatabase, config.RankCacheTTL)
+	log.Printf("GrapeRank: %t (follow=%.2f, mute=%.2f, report=%.2f)", config.GrapeRankEnabled, config.SignalWeightFollow, config.SignalWeightMute, config.SignalWeightReport)
 	log.Printf("NIP-42 required for REQ/COUNT: %t", config.EnableNIP42Auth)
 	if config.RequestPolicyPlugin != "" {
 		log.Printf("Request policy plugin enabled: %s (timeout=%v, fail_open=%t)", config.RequestPolicyPlugin, config.RequestPolicyTimeout, config.RequestPolicyFailOpen)
