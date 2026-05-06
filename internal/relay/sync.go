@@ -81,13 +81,14 @@ func (s *Syncer) SyncUserEvents(ctx context.Context, pubkey string, userRelays [
 
 	// Filters for user's own relays
 	userFilters := []nostr.Filter{
-		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{1}},    // Posts/replies
-		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{7}},    // Reactions
-		{Kinds: []nostr.Kind{3}, Tags: nostr.TagMap{"p": []string{pubkey}}},                   // Followers
-		{Kinds: []nostr.Kind{9735}, Tags: nostr.TagMap{"p": []string{pubkey}}},                // Zaps received
-		{Kinds: []nostr.Kind{9735}, Tags: nostr.TagMap{"P": []string{pubkey}}},                // Zaps sent (P = sender)
-		{Kinds: []nostr.Kind{9321}, Tags: nostr.TagMap{"p": []string{pubkey}}},                // Nutzaps received
-		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{9321}}, // Nutzaps sent
+		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{1}},     // Posts/replies
+		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{7}},     // Reactions
+		{Kinds: []nostr.Kind{3}, Tags: nostr.TagMap{"p": []string{pubkey}}},                    // Followers
+		{Kinds: []nostr.Kind{9735}, Tags: nostr.TagMap{"p": []string{pubkey}}},                 // Zaps received
+		{Kinds: []nostr.Kind{9735}, Tags: nostr.TagMap{"P": []string{pubkey}}},                 // Zaps sent (P = sender)
+		{Kinds: []nostr.Kind{9321}, Tags: nostr.TagMap{"p": []string{pubkey}}},                 // Nutzaps received
+		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{9321}},  // Nutzaps sent
+		{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{10000}}, // Mute list
 	}
 
 	// Reports should be fetched from popular relays + user relays
@@ -169,6 +170,9 @@ func (s *Syncer) SyncUserEventsAsync(ctx context.Context, pubkey string, userRel
 		if filterType&keys.FilterZapsSent != 0 {
 			userFilters = append(userFilters, nostr.Filter{Kinds: []nostr.Kind{9735}, Tags: nostr.TagMap{"P": []string{pubkey}}})
 			userFilters = append(userFilters, nostr.Filter{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{9321}})
+		}
+		if filterType&keys.FilterMuteLists != 0 {
+			userFilters = append(userFilters, nostr.Filter{Authors: []nostr.PubKey{nostr.MustPubKeyFromHex(pubkey)}, Kinds: []nostr.Kind{10000}})
 		}
 		if filterType&keys.FilterReportsRecd != 0 {
 			reportFilters = append(reportFilters, nostr.Filter{Kinds: []nostr.Kind{1984}, Tags: nostr.TagMap{"p": []string{pubkey}}})
