@@ -212,7 +212,9 @@ func (h *Handler) streamUserAssertions(ctx context.Context, pubkey string, reque
 	}
 
 	// Send initial metrics from local DB (will be 0 if no cached data)
-	h.sendUserMetrics(ctx, pubkey, KindUserAssertionStr, requestedAuthors, yield, false)
+	if !h.sendUserMetrics(ctx, pubkey, KindUserAssertionStr, requestedAuthors, yield, false) {
+		return
+	}
 
 	// Start async sync with only the required filters
 	progress := h.syncer.SyncUserEventsAsync(ctx, pubkey, userRelays, filterType)
@@ -231,7 +233,9 @@ func (h *Handler) streamUserAssertions(ctx context.Context, pubkey string, reque
 		case <-progress.Done:
 			// Final update
 			log.Printf("[handler] Sync complete for %s, sending final metrics", pubkey[:16]+"...")
-			h.sendUserMetrics(ctx, pubkey, KindUserAssertionStr, requestedAuthors, yield, true)
+			if !h.sendUserMetrics(ctx, pubkey, KindUserAssertionStr, requestedAuthors, yield, true) {
+				return
+			}
 			return
 
 		case <-ticker.C:
@@ -240,7 +244,9 @@ func (h *Handler) streamUserAssertions(ctx context.Context, pubkey string, reque
 			if currentCount > lastEventCount {
 				log.Printf("[handler] Progress update for %s: %d events (was %d)", pubkey[:16]+"...", currentCount, lastEventCount)
 				lastEventCount = currentCount
-				h.sendUserMetrics(ctx, pubkey, KindUserAssertionStr, requestedAuthors, yield, false)
+				if !h.sendUserMetrics(ctx, pubkey, KindUserAssertionStr, requestedAuthors, yield, false) {
+					return
+				}
 			}
 		}
 	}
@@ -248,7 +254,8 @@ func (h *Handler) streamUserAssertions(ctx context.Context, pubkey string, reque
 
 // sendUserMetrics computes and sends user metric events
 // isFinal indicates this is the last update (publish to storage relays)
-func (h *Handler) sendUserMetrics(ctx context.Context, pubkey string, kind string, requestedAuthors map[string]bool, yield func(nostr.Event) bool, isFinal bool) {
+// Returns false if client disconnected, true otherwise
+func (h *Handler) sendUserMetrics(ctx context.Context, pubkey string, kind string, requestedAuthors map[string]bool, yield func(nostr.Event) bool, isFinal bool) bool {
 	log.Printf("[handler] sendUserMetrics start pubkey=%s kind=%s requestedAuthors=%v isFinal=%t", truncateSubject(pubkey), kind, requestedAuthors, isFinal)
 	pTag := nostr.Tag{"p", pubkey}
 
@@ -288,7 +295,7 @@ func (h *Handler) sendUserMetrics(ctx context.Context, pubkey string, kind strin
 		}
 		if !yield(event) {
 			log.Printf("[handler] yield returned false after sending user metric=%s pubkey=%s", name, truncateSubject(pubkey))
-			return
+			return false
 		}
 		log.Printf("[handler] yield succeeded for user metric=%s pubkey=%s", name, truncateSubject(pubkey))
 	}
@@ -314,10 +321,13 @@ func (h *Handler) sendUserMetrics(ctx context.Context, pubkey string, kind strin
 				if isFinal {
 					h.publishToStorageRelays(topicEvent)
 				}
-				yield(topicEvent)
+				if !yield(topicEvent) {
+					return false
+				}
 			}
 		}
 	}
+	return true
 }
 
 // generateUserAssertions creates kind 30382 assertions for a pubkey (one per metric) - blocking version
@@ -430,7 +440,9 @@ func (h *Handler) streamEventAssertions(ctx context.Context, eventID string, req
 	log.Printf("[handler] Starting lazy load for event %s", eventID[:16]+"...")
 
 	// Send initial metrics from local DB
-	h.sendEventMetrics(ctx, eventID, KindEventAssertionStr, requestedAuthors, yield, false)
+	if !h.sendEventMetrics(ctx, eventID, KindEventAssertionStr, requestedAuthors, yield, false) {
+		return
+	}
 
 	// Start async sync
 	progress := h.syncer.SyncEventInteractionsAsync(ctx, eventID)
@@ -446,20 +458,25 @@ func (h *Handler) streamEventAssertions(ctx context.Context, eventID string, req
 			return
 		case <-progress.Done:
 			log.Printf("[handler] Sync complete for event %s, sending final metrics", eventID[:16]+"...")
-			h.sendEventMetrics(ctx, eventID, KindEventAssertionStr, requestedAuthors, yield, true)
+			if !h.sendEventMetrics(ctx, eventID, KindEventAssertionStr, requestedAuthors, yield, true) {
+				return
+			}
 			return
 		case <-ticker.C:
 			currentCount := atomic.LoadInt64(&progress.EventCount)
 			if currentCount > lastEventCount {
 				lastEventCount = currentCount
-				h.sendEventMetrics(ctx, eventID, KindEventAssertionStr, requestedAuthors, yield, false)
+				if !h.sendEventMetrics(ctx, eventID, KindEventAssertionStr, requestedAuthors, yield, false) {
+					return
+				}
 			}
 		}
 	}
 }
 
 // sendEventMetrics computes and sends event metric events
-func (h *Handler) sendEventMetrics(ctx context.Context, eventID string, kind string, requestedAuthors map[string]bool, yield func(nostr.Event) bool, isFinal bool) {
+// Returns false if client disconnected, true otherwise
+func (h *Handler) sendEventMetrics(ctx context.Context, eventID string, kind string, requestedAuthors map[string]bool, yield func(nostr.Event) bool, isFinal bool) bool {
 	log.Printf("[handler] sendEventMetrics start eventID=%s kind=%s requestedAuthors=%v isFinal=%t", eventID[:16]+"...", kind, requestedAuthors, isFinal)
 	eTag := nostr.Tag{"e", eventID}
 	m := metrics.ComputeEventMetrics(h.db, eventID)
@@ -483,9 +500,10 @@ func (h *Handler) sendEventMetrics(ctx context.Context, eventID string, kind str
 		}
 		if !yield(event) {
 			log.Printf("[handler] yield returned false after sending event metric=%s eventID=%s", name, eventID[:16]+"...")
-			return
+			return false
 		}
 	}
+	return true
 }
 
 // streamAddressAssertions streams address assertions with lazy loading
@@ -497,7 +515,9 @@ func (h *Handler) streamAddressAssertions(ctx context.Context, address string, r
 	log.Printf("[handler] Starting lazy load for address %s", address)
 
 	// Send initial metrics from local DB
-	h.sendAddressMetrics(ctx, address, KindAddressAssertionStr, requestedAuthors, yield, false)
+	if !h.sendAddressMetrics(ctx, address, KindAddressAssertionStr, requestedAuthors, yield, false) {
+		return
+	}
 
 	// Start async sync
 	progress := h.syncer.SyncAddressInteractionsAsync(ctx, address)
@@ -513,20 +533,25 @@ func (h *Handler) streamAddressAssertions(ctx context.Context, address string, r
 			return
 		case <-progress.Done:
 			log.Printf("[handler] Sync complete for address %s, sending final metrics", address)
-			h.sendAddressMetrics(ctx, address, KindAddressAssertionStr, requestedAuthors, yield, true)
+			if !h.sendAddressMetrics(ctx, address, KindAddressAssertionStr, requestedAuthors, yield, true) {
+				return
+			}
 			return
 		case <-ticker.C:
 			currentCount := atomic.LoadInt64(&progress.EventCount)
 			if currentCount > lastEventCount {
 				lastEventCount = currentCount
-				h.sendAddressMetrics(ctx, address, KindAddressAssertionStr, requestedAuthors, yield, false)
+				if !h.sendAddressMetrics(ctx, address, KindAddressAssertionStr, requestedAuthors, yield, false) {
+					return
+				}
 			}
 		}
 	}
 }
 
 // sendAddressMetrics computes and sends address metric events
-func (h *Handler) sendAddressMetrics(ctx context.Context, address string, kind string, requestedAuthors map[string]bool, yield func(nostr.Event) bool, isFinal bool) {
+// Returns false if client disconnected, true otherwise
+func (h *Handler) sendAddressMetrics(ctx context.Context, address string, kind string, requestedAuthors map[string]bool, yield func(nostr.Event) bool, isFinal bool) bool {
 	log.Printf("[handler] sendAddressMetrics start address=%s kind=%s requestedAuthors=%v isFinal=%t", address, kind, requestedAuthors, isFinal)
 	aTag := nostr.Tag{"a", address}
 	m := metrics.ComputeAddressMetrics(h.db, address)
@@ -550,9 +575,10 @@ func (h *Handler) sendAddressMetrics(ctx context.Context, address string, kind s
 		}
 		if !yield(event) {
 			log.Printf("[handler] yield returned false after sending address metric=%s address=%s", name, address)
-			return
+			return false
 		}
 	}
+	return true
 }
 
 // generateEventAssertions creates kind 30383 assertions for an event ID (one per metric) - blocking version
